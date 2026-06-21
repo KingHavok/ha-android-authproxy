@@ -373,11 +373,14 @@ jobs:
           set -euo pipefail
           APK="app/build/outputs/apk/minimal/debug/app-minimal-debug.apk"
           BT="$(ls -d "${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"/build-tools/* | sort -V | tail -n1)"
+          # Extract the 64-hex-char certificate digest robustly (grep the hex run,
+          # not a fragile field split — the apksigner line wording can vary).
           GOT="$("${BT}/apksigner" verify --print-certs "${APK}" \
-            | awk -F': ' '/SHA-256 digest/{print $2; exit}')"
-          echo "Signer cert SHA-256: ${GOT}"
+            | grep -m1 'certificate SHA-256 digest' \
+            | grep -oiE '[0-9a-f]{64}' | tr '[:upper:]' '[:lower:]')"
+          echo "Signer cert SHA-256: ${GOT:-<none>}"
           if [ "${GOT}" != "${EXPECTED_SHA256}" ]; then
-            echo "::error::APK signed with unexpected key ${GOT} (expected ${EXPECTED_SHA256}); stable signing regressed"
+            echo "::error::APK signed with unexpected key ${GOT:-<none>} (expected ${EXPECTED_SHA256}); stable signing regressed"
             exit 1
           fi
           echo "Verified: APK is signed with the stable committed debug key"
