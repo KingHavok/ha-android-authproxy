@@ -109,7 +109,7 @@ The patch is a `git format-patch` file, so it preserves the original author, com
 
 This app holds your **Home Assistant long-lived auth token**. Installing a third-party build of an app like that is a real trust decision, so here is the honest picture:
 
-- **It is debug-signed.** Every release is signed with the **universal Android debug keystore** that ships with the Android SDK — the same key on every developer's machine. That keystore is **public and not secret**; a debug signature proves **nothing** about who built the APK and provides **no** supply-chain guarantee. Do not treat the signature as identity. Treat the **build process** (below) and the **patch** as the things to verify.
+- **It is debug-signed, with a fixed key.** Releases are signed with a **debug keystore committed to this repo** ([`keystore/debug.keystore`](keystore/debug.keystore)), using the well-known debug credentials (alias `androiddebugkey`, password `android`). That keystore is **public and not secret** by design, so a debug signature proves **nothing** about who built the APK and is **no** supply-chain guarantee — treat the **build process** (below) and the **patch** as the things to verify, not the signature. The reason it's a *fixed* key rather than a throwaway is purely practical: every release is signed identically, so Android installs updates **in place** (no uninstall/reinstall between versions) and you only have to clear Google Play Protect once. (See [Installing](#installing) for the Play Protect steps.)
 - **It holds your HA auth token.** The token-bearing JavaScript bridge is the most sensitive surface in the app. This patch is deliberately narrow and is designed to keep that bridge anchored to your real Home Assistant origin, consistent with the hardening direction of [#6733](https://github.com/home-assistant/android/pull/6733). It does not add new token handling.
 - **Read the patch.** The complete change is **one short file**: [`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch). Three files, ~61 lines. You can read it in a few minutes. Everything else in any release is **byte-for-byte upstream Home Assistant**.
 - **Build it yourself.** You don't have to trust the published APK at all. The [build instructions](#building-it-yourself) let you reproduce a release from the exact upstream commit it names. The workflow that produces releases is in this repo in full — there is nothing hidden.
@@ -145,11 +145,12 @@ This is a perfectly normal way to install a sideloaded APK; the only wrinkle is 
 1. Get the downloaded APK onto the phone (download it directly on the device, or transfer it via Drive, email, USB, etc.).
 2. Open it with a file manager and tap **Install**.
 3. The first time, Android asks you to **allow your file manager / browser to install unknown apps** — grant it (Android **Settings → Apps → [that app] → Install unknown apps → Allow**), then go back and tap **Install** again.
-4. **Google Play Protect** will likely interrupt with *"Unsafe app blocked"* or *"App scan recommended"*. This is expected for any non-Play app and is **not** a finding that the app is malicious. To proceed:
-   - Tap **More details** (the small link — *not* the big **OK**/**Cancel** button).
-   - Then tap **Install anyway**.
-   - If Play Protect insists on scanning, let it scan, then choose **Install without scanning** / **Install anyway**.
-5. If your device is configured to block this outright, you can temporarily turn the scanner off: **Play Store → your profile icon → Play Protect → ⚙ (settings) → turn off "Scan apps with Play Protect"**, install, then turn it back on. (Optional — most devices allow "Install anyway" without this.)
+4. **Google Play Protect** will interrupt. This is expected for any non-Play app and is **not** a finding that the app is malicious — Play Protect flags the *distribution channel* and the unrecognized signing certificate, not anything the app does. You'll see one of two dialogs:
+   - **Soft block** — *"Unsafe app blocked"* / *"App scan recommended"* with a small **More details** link: tap **More details** (not the big **OK**), then **Install anyway**. If it insists on scanning, let it, then choose **Install without scanning** / **Install anyway**.
+   - **Hard block** — *"App was blocked to protect your device… can request access to sensitive data"* with **only an OK button and no bypass**. This stronger tier appears for an unrecognized certificate combined with the app's sensitive permissions. There's no in-dialog bypass, so use step 5.
+5. **If you got the hard block (OK-only), turn the scanner off for the install:** open the **Play Store app → your profile icon → Play Protect → ⚙ (settings) → turn off "Scan apps with Play Protect"**. Re-open the APK and install it (it goes straight through now), then **turn Play Protect back on**. It will not re-flag the app once it's installed, and because every release here is signed with the **same key**, future updates install over the top **without** another block.
+
+> **Easiest of all, if you have a computer:** [Path B (ADB)](#path-b--install-over-adb-computer--usb) skips the Play Protect dialog entirely — no scanner toggling needed.
 
 ### Path B — install over ADB (computer + USB)
 

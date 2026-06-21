@@ -315,6 +315,28 @@ jobs:
           echo "Mock google-services.json placed at app/google-services.json"
 
       # ----------------------------------------------------------------------
+      # 7b. Use a STABLE debug signing key for every release.
+      #     A fresh GitHub runner has no ~/.android/debug.keystore, so Gradle's
+      #     default debug signingConfig would GENERATE A NEW key on every build.
+      #     That means each release would carry a different signature, which
+      #     (a) makes Android refuse to update one release over another
+      #     (signature mismatch -> reinstall required), and (b) shows Google
+      #     Play Protect an unknown certificate every single time. Committing one
+      #     fixed debug keystore and dropping it where Gradle expects it makes
+      #     every release identically signed: in-place updates work, and a user
+      #     only has to clear Play Protect once. (A debug keystore is NOT secret
+      #     - the password is the well-known "android" - so committing it is
+      #     safe; the signature is not a trust claim. See the README.)
+      # ----------------------------------------------------------------------
+      - name: Install the stable debug signing key
+        if: steps.noop.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.android"
+          cp keystore/debug.keystore "${HOME}/.android/debug.keystore"
+          echo "Stable debug keystore installed at ~/.android/debug.keystore"
+
+      # ----------------------------------------------------------------------
       # 8. JDK 21 (temurin) - required toolchain for the build.
       # ----------------------------------------------------------------------
       - name: Set up JDK 21
