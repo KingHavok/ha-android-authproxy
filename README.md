@@ -12,6 +12,7 @@ This repository does **not** contain a fork of the Home Assistant app. It contai
 - [The problem it solves](#the-problem-it-solves)
 - [Exactly what is modified](#exactly-what-is-modified)
 - [What works, and the federated-login limitation](#what-works-and-the-federated-login-limitation)
+- [Why this isn't in Home Assistant core](#why-this-isnt-in-home-assistant-core-and-may-not-ever-be)
 - [Trust and security](#trust-and-security)
 - [Installing](#installing)
 - [Versioning](#versioning)
@@ -49,7 +50,9 @@ The fix is to distinguish two kinds of navigation:
 
 This was proposed upstream as **[home-assistant/android#6725](https://github.com/home-assistant/android/pull/6725)** ("support external authentication providers in front of Home Assistant"). It was **closed, not merged**: the maintainers decided that external-auth-provider support belongs in Home Assistant **core** rather than in each client, and raised security concerns about broadening what the WebView is allowed to load while the JavaScript auth bridge is present.
 
-A related security-hardening change, **[home-assistant/android#6733](https://github.com/home-assistant/android/pull/6733)** ("tie legacy externalApp bridge lifecycle to the configured server origin"), tightened when the token-bearing JavaScript bridge is exposed — removing it when the WebView is off-origin and restoring it on return. That hardening informs this patch's design: the auth token bridge should only ever be live on your real Home Assistant origin, not on the proxy's login pages.
+A separate, self-contained security-hardening change, **[home-assistant/android#6733](https://github.com/home-assistant/android/pull/6733)** ("tie legacy externalApp bridge lifecycle to the configured server origin"), tightened when the token-bearing JavaScript bridge is exposed — removing it when the WebView is off-origin and restoring it on return, so the auth-token bridge is only ever live on your real Home Assistant origin and never on a proxy's login pages. It was offered as a standalone hardening that stands on its own merits regardless of the feature. It was **also closed, not merged**; the maintainer's reasoning was that the hardening is *"only relevant if we ever allow loading an url that is not Home Assistant"* — i.e. it only matters if the feature in #6725 is accepted, which they had already declined. That hardening still informs this patch's design.
+
+So **both** the feature and the defence-in-depth that would accompany it were declined. See [Why this isn't in Home Assistant core](#why-this-isnt-in-home-assistant-core-and-may-not-ever-be) for the architectural, philosophical, and (speculatively) commercial reasons — and why that's unlikely to change.
 
 This repository exists so people who already run an auth proxy can keep using the app **today**, on top of current upstream, until (or unless) Home Assistant core addresses it.
 
@@ -100,6 +103,42 @@ In short: anything that draws its **own** login UI works; anything that bounces 
 
 ---
 
+## Why this isn't in Home Assistant core (and may not ever be)
+
+If you found this repo, you probably already discovered that the "right" way to do this — get the Android companion app to work behind an OIDC/OAuth2 auth proxy — was proposed upstream and turned down. That's not a conspiracy, and this section isn't a complaint. It's an attempt to explain the situation honestly so you can set realistic expectations.
+
+### What the maintainers actually said
+
+Two pull requests against the Android app were closed, not merged. In [home-assistant/android#6725](https://github.com/home-assistant/android/pull/6725), maintainer TimoPtr closed the feature with:
+
+> "All of these tickets are being closed because we are not planning to add support for external authentication providers at the Android app level. This is a broader architectural concern that needs to be addressed at the Home Assistant core level rather than within a single client... support for standards like OIDC would need to be implemented in core first and then leveraged by clients, including Android."
+
+He also cited WebView attack surface (the JavaScript bridge that carries auth tokens) and noted mTLS and VPN as the recommended paths. A second PR, [home-assistant/android#6733](https://github.com/home-assistant/android/pull/6733), hardened that token-bearing bridge — and was *also* declined, on the grounds that it is "only relevant if we ever allow loading an url that is not Home Assistant." In other words: fix the client only after core leads, and core hasn't.
+
+### The architectural reason
+
+"Do it in core first" is a real ask, not a deflection. Core today documents exactly three auth providers — `homeassistant` (local username/password), `trusted_networks` (an IP allowlist), and `command_line` ([docs](https://www.home-assistant.io/docs/authentication/providers/)). None is an external-IdP or OIDC client. Core's auth is built on OAuth2 plus IndieAuth, where credentials are validated *only at login*; after that, a refresh/access-token pair is issued and subsequent requests rely on those tokens without re-checking any upstream provider ([auth API](https://developers.home-assistant.io/docs/auth_api/)).
+
+That design produces the maintainers' most-cited objection. As quoted in [architecture#832](https://github.com/home-assistant/architecture/issues/832), balloob (Paulus Schoutsen) asked "how do we want to deal with users that are no longer allowed to log in?" — because a user disabled at an external IdP can stay authenticated until their token expires (access tokens last 30 minutes, but long-lived tokens last 10 years). Earlier core PRs to add OpenID Connect ([#32926](https://github.com/home-assistant/core/pull/32926)) and LDAP ([#37645](https://github.com/home-assistant/core/pull/37645)) were both closed unmerged, with balloob noting "Every bug could end up with a system that can be accessed unauthorized." The other recurring theme is ownership: when a header-auth PR ([#38175](https://github.com/home-assistant/core/pull/38175)) was proposed, balloob declined it because "the moment we accept this PR, it becomes our responsibility." Bolting a federated IdP onto this single-client token model isn't a small patch — it would mean rethinking how and when core re-validates identity.
+
+### The philosophical reason
+
+Home Assistant and the Open Home Foundation are explicitly local-first and privacy-first. The Foundation's values are privacy, choice, and sustainability, and the [Open Home manifesto](https://www.home-assistant.io/blog/2021/12/23/the-open-home/) states "Devices need to work locally" and that a cloud connection "should be extra and opt-in." Schoutsen's ["Local = Reliable"](https://newsletter.openhomefoundation.org/local-equals-reliable/) argues that "your smart home shouldn't be beholden to anything outside of your home to function."
+
+A federated or cloud identity provider is, structurally, exactly the kind of external dependency that stance is wary of. Maintainer frenck made the connection directly in [architecture#832](https://github.com/home-assistant/architecture/issues/832): external auth "works a little against the core values (local vs remote in auth)," adding "I am pretty sure my dad... isn't using SSO to log in to his home devices." *(Inference, clearly labeled: I read the reluctance as a coherent extension of the local-first philosophy rather than indifference — though note other commenters in that same thread disputed the "average user" framing, pointing out that plenty of self-hosters do run Keycloak or Authentik at home.)*
+
+### Speculation (clearly labeled)
+
+Here's the part that is *my read, not a documented fact.* Home Assistant's officially recommended remote-access path is Home Assistant Cloud (Nabu Casa), which sells secure remote access without opening ports (a low monthly subscription) and whose subscriptions, by the project's own [docs](https://www.home-assistant.io/docs/configuration/securing/), "help fund the development of Home Assistant itself" and support the Open Home Foundation. Speculatively, a project whose blessed remote-access path is also its funding model may have weaker incentive to make DIY reverse-proxy + OIDC setups first-class.
+
+I want to be explicit: **this is speculation, not evidence of bad faith.** No source asserts a revenue motive, no documented Nabu Casa product gates HA behind an external auth proxy, and the stated technical reasons — token revocation, attack surface, maintenance ownership — may be the whole story. They are coherent and sufficient on their own.
+
+### Takeaway
+
+That's why this repo exists: to give self-hosters the OIDC-proxy path that core doesn't natively support today — and it would become unnecessary the day Home Assistant core ships a first-class external-IdP/OIDC auth provider that the clients can simply use.
+
+---
+
 ## Trust and security
 
 This app holds your **Home Assistant long-lived auth token**. Installing a third-party build of an app like that is a real trust decision, so here is the honest picture:
@@ -131,15 +170,32 @@ If any of the above makes you uncomfortable, the right move is to [build it your
    shasum -a 256 ha-android-authproxy-*-minimal-debug.apk
    ```
 
-2. **Install over ADB** (recommended — this is the smoothest path for a sideloaded build):
+2. **Install it.** Two paths — pick whichever suits you. The **on-device** path needs no computer and is the one most people will use.
 
-   ```sh
-   adb install -r ha-android-authproxy-<VERSION>-g<SHORT>-minimal-debug.apk
-   ```
+### Path A — install on the phone (no computer needed)
 
-   The `-r` reinstalls/upgrades in place, preserving your data.
+This is a perfectly normal way to install a sideloaded APK; the only wrinkle is clicking past Google Play Protect, which flags *any* app that didn't come from the Play Store.
 
-3. **Play Protect note.** Because this is a sideloaded, debug-signed build, **Google Play Protect may warn you** or ask to scan it, and on-device "Install unknown apps" prompts will appear. That warning is expected for any non-Play APK; it is not a statement that the app is malicious. Installing via `adb install -r` is the smoothest route, but note it does not disable Play Protect — Play Protect can still flag or block sideloaded apps on some devices.
+1. Get the downloaded APK onto the phone (download it directly on the device, or transfer it via Drive, email, USB, etc.).
+2. Open it with a file manager and tap **Install**.
+3. The first time, Android asks you to **allow your file manager / browser to install unknown apps** — grant it (Android **Settings → Apps → [that app] → Install unknown apps → Allow**), then go back and tap **Install** again.
+4. **Google Play Protect** will likely interrupt with *"Unsafe app blocked"* or *"App scan recommended"*. This is expected for any non-Play app and is **not** a finding that the app is malicious. To proceed:
+   - Tap **More details** (the small link — *not* the big **OK**/**Cancel** button).
+   - Then tap **Install anyway**.
+   - If Play Protect insists on scanning, let it scan, then choose **Install without scanning** / **Install anyway**.
+5. If your device is configured to block this outright, you can temporarily turn the scanner off: **Play Store → your profile icon → Play Protect → ⚙ (settings) → turn off "Scan apps with Play Protect"**, install, then turn it back on. (Optional — most devices allow "Install anyway" without this.)
+
+### Path B — install over ADB (computer + USB)
+
+If you have the Android platform-tools and USB debugging enabled, this is the fastest repeatable path and **does not trip the Play Protect dialog**:
+
+```sh
+adb install -r ha-android-authproxy-<VERSION>-g<SHORT>-minimal-debug.apk
+```
+
+The `-r` reinstalls/upgrades in place, preserving the app's data.
+
+> **Why the Play Protect warning happens at all:** this APK is **debug-signed** (with the public, universal Android debug key) rather than signed by a registered Play developer, and it didn't come from the Play Store. Play Protect warns on every such app. The warning speaks to the *distribution channel*, not to anything the app does — which is exactly why the [Trust and security](#trust-and-security) section tells you how to read the patch and build it yourself.
 
 ### It coexists with the Play Store app
 

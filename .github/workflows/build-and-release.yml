@@ -31,6 +31,15 @@ on: # yamllint disable-line rule:truthy
   push:
     branches:
       - main
+    # Docs-only edits should not trigger a full APK rebuild + release republish.
+    # A push still rebuilds when it touches the patch, the scripts, or this
+    # workflow (anything not listed here), which is what actually affects output.
+    paths-ignore:
+      - "README.md"
+      - "LICENSE"
+      - "NOTICE"
+      - ".gitignore"
+      - "**/*.md"
 
 # Minimal permissions:
 #   contents: write -> create the release + git tag on THIS repo.
