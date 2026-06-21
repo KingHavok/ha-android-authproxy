@@ -1,0 +1,41 @@
+// Gradle init script: force the Android `debug` signing config of every
+// application module to use a FIXED, committed keystore instead of the
+// per-machine `~/.android/debug.keystore` that AGP would otherwise generate.
+//
+// Why an init script: AGP resolves the default debug keystore from a location
+// that depends on env vars (ANDROID_USER_HOME / ANDROID_SDK_HOME / ~/.android),
+// which differ on GitHub-hosted runners — so simply dropping a keystore in
+// ~/.android is unreliable. Setting storeFile explicitly here is deterministic
+// regardless of the runner's environment, and it does not require modifying
+// upstream's build files.
+//
+// The keystore path is passed in via the AUTHPROXY_KEYSTORE environment
+// variable (absolute path). Credentials are the well-known Android debug
+// values (alias "androiddebugkey", password "android"); the keystore is public
+// by design — see the repo README's "Trust and security" section.
+
+def ksPath = System.getenv('AUTHPROXY_KEYSTORE')
+
+gradle.beforeProject { project ->
+    project.plugins.withId('com.android.application') {
+        if (!ksPath) {
+            throw new GradleException(
+                'signing-override.init.gradle: AUTHPROXY_KEYSTORE env var is not set')
+        }
+        def ksFile = new File(ksPath)
+        if (!ksFile.isFile()) {
+            throw new GradleException(
+                "signing-override.init.gradle: keystore not found at ${ksPath}")
+        }
+        project.extensions.configure('android') { android ->
+            android.signingConfigs.named('debug').configure { sc ->
+                sc.storeFile = ksFile
+                sc.storePassword = 'android'
+                sc.keyAlias = 'androiddebugkey'
+                sc.keyPassword = 'android'
+            }
+        }
+        project.logger.lifecycle(
+            "[authproxy] debug signingConfig pinned to ${ksFile.absolutePath}")
+    }
+}
