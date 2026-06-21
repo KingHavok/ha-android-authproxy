@@ -133,14 +133,19 @@ jobs:
 
       # ----------------------------------------------------------------------
       # 4. Clone upstream at the resolved SHA, WITH FULL HISTORY AND TAGS.
-      #    reckon (org.ajoberstar.reckon.settings) infers project.version by
-      #    walking history for the nearest *ancestor* tag of HEAD. A shallow
-      #    clone cuts that walk short, so reckon may not find a base version.
-      #    We use a blobless partial clone (--filter=blob:none): it brings the
-      #    complete commit graph + all tags (so reckon's ancestor walk always
-      #    succeeds) while fetching file blobs lazily only for the checkout we
-      #    actually build - far cheaper than a full clone, far safer than a
-      #    shallow one.
+      #    The "reckon" Gradle plugin (org.ajoberstar.reckon.settings) computes
+      #    project.version from git tags AND refuses to release a significant
+      #    stage (we pass -Preckon.stage=beta in step 9) unless the repo is
+      #    "clean" per its git library (JGit). Two clone shapes break this:
+      #      * a SHALLOW clone cuts reckon's ancestor-tag walk short, and
+      #      * a BLOBLESS PARTIAL clone (--filter=blob:none) makes JGit report
+      #        tracked files as modified (it cannot read the filtered-out blobs
+      #        to confirm they match), so reckon sees a "dirty" repo and aborts
+      #        with "Cannot release a final or significant stage without a clean
+      #        repo." (Confirmed empirically.)
+      #    A plain FULL clone (complete history + all tags + all blobs) is the
+      #    only shape that reliably satisfies reckon. The extra fetch time is
+      #    negligible for a daily build, and correctness beats shaving a minute.
       # ----------------------------------------------------------------------
       - name: Clone upstream with full history and tags
         env:
@@ -149,14 +154,20 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "${UPSTREAM_DIR}"
-          # Blobless partial clone: full commit/tag history, blobs on demand.
-          git clone -q --filter=blob:none --no-checkout \
-            "https://github.com/${UPSTREAM_REPO}.git" "${UPSTREAM_DIR}"
+          # Full clone: complete commit graph, all tags, all blobs.
+          git clone -q "https://github.com/${UPSTREAM_REPO}.git" "${UPSTREAM_DIR}"
           cd "${UPSTREAM_DIR}"
-          # Ensure tags are present (clone brings them, but be explicit).
+          # Belt-and-suspenders: ensure every tag is present for reckon.
           git fetch -q --tags origin
           # Check out the exact upstream commit we resolved in step 2.
           git checkout -q "${SHA}"
+          # Sanity: the working tree must be clean for reckon's significant
+          # stage. (git am in the next step adds a clean commit on top.)
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Upstream working tree unexpectedly dirty after checkout"
+            git status --porcelain
+            exit 1
+          fi
           echo "Upstream checked out at ${SHA}; tags present:"
           git tag | wc -l
 
