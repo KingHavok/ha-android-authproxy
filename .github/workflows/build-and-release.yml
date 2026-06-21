@@ -325,19 +325,49 @@ jobs:
           java-version: "21"
 
       # ----------------------------------------------------------------------
-      # 9. Build the FOSS minimal debug APK.
+      # 8b. Decode the PRIVATE project release keystore from a repo secret.
+      #     Releases are signed with a self-signed key that only the maintainer
+      #     holds (NOT a committed/public key), so a forged "update" cannot be
+      #     signed to install in place over a real install, and we no longer
+      #     share the universal "CN=Android Debug" certificate that AV/Play
+      #     Protect heuristics penalise. The keystore lives base64-encoded in the
+      #     SIGNING_KEYSTORE_B64 secret and is decoded to a runner-temp file.
+      #     Forks without these secrets fail here with a clear message (they must
+      #     supply their own signing key).
+      # ----------------------------------------------------------------------
+      - name: Decode signing keystore
+        id: keystore
+        if: steps.noop.outputs.skip != 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64}" ]; then
+            echo "::error::SIGNING_KEYSTORE_B64 secret is empty. Set the signing secrets (SIGNING_KEYSTORE_B64, SIGNING_STORE_PASS, SIGNING_KEY_ALIAS, SIGNING_KEY_PASS) on this repo, or supply your own signing key if you forked this."
+            exit 1
+          fi
+          KS="${RUNNER_TEMP}/authproxy-release.jks"
+          printf '%s' "${KEYSTORE_B64}" | base64 -d > "${KS}"
+          if [ ! -s "${KS}" ]; then
+            echo "::error::Decoded keystore is empty — SIGNING_KEYSTORE_B64 is not valid base64"
+            exit 1
+          fi
+          echo "path=${KS}" >> "${GITHUB_OUTPUT}"
+          echo "Signing keystore decoded to runner temp"
+
+      # ----------------------------------------------------------------------
+      # 9. Build the FOSS minimal debug APK, signed with the project release key.
       #
-      #    Stable signing: a fresh runner has no debug keystore, so Gradle's
-      #    default debug signingConfig would MINT A NEW key per build -> each
-      #    release a different signature -> Android refuses in-place updates and
-      #    Play Protect sees an unknown cert every time. Dropping a keystore in
-      #    ~/.android does NOT reliably fix this: AGP resolves the debug keystore
-      #    from ANDROID_USER_HOME / ANDROID_SDK_HOME (set on GitHub runners), not
-      #    necessarily ~/.android. So we pin it deterministically with a Gradle
-      #    init script (keystore/signing-override.init.gradle) that sets the debug
-      #    signingConfig.storeFile to our committed keystore (path via the
-      #    AUTHPROXY_KEYSTORE env var). The keystore is public/non-secret by
-      #    design; the signature is not a trust claim (see the README).
+      #    A fresh runner has no usable keystore, so Gradle's default debug
+      #    signingConfig would MINT A NEW key per build -> each release a
+      #    different signature -> Android refuses in-place updates and Play
+      #    Protect sees an unknown cert every time. Dropping a keystore in
+      #    ~/.android does NOT reliably fix this (AGP resolves the debug keystore
+      #    from ANDROID_USER_HOME / ANDROID_SDK_HOME on runners). So we pin it
+      #    deterministically with a Gradle init script
+      #    (keystore/signing-override.init.gradle), pointing the debug
+      #    signingConfig at the decoded release keystore and its credentials via
+      #    AUTHPROXY_* env vars (sourced from secrets — never echoed).
       #
       #    -Preckon.stage=beta satisfies reckon: GitHub Actions sets CI=true,
       #    which selects upstream's stages("beta","final") branch; that branch
@@ -349,7 +379,10 @@ jobs:
         if: steps.noop.outputs.skip != 'true'
         working-directory: ${{ env.UPSTREAM_DIR }}
         env:
-          AUTHPROXY_KEYSTORE: ${{ github.workspace }}/keystore/debug.keystore
+          AUTHPROXY_KEYSTORE: ${{ steps.keystore.outputs.path }}
+          AUTHPROXY_KEYSTORE_PASS: ${{ secrets.SIGNING_STORE_PASS }}
+          AUTHPROXY_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          AUTHPROXY_KEY_PASS: ${{ secrets.SIGNING_KEY_PASS }}
         run: |
           set -euo pipefail
           chmod +x ./gradlew
@@ -359,16 +392,18 @@ jobs:
             --no-daemon --stacktrace
 
       # ----------------------------------------------------------------------
-      # 9b. Fail loudly if the APK is NOT signed with the stable committed key.
+      # 9b. Fail loudly if the APK is NOT signed with the project release key.
       #     Guards against the signing override silently regressing (which would
-      #     ship an unknown-cert APK that breaks updates + trips Play Protect).
-      #     EXPECTED_SHA256 is the SHA-256 of keystore/debug.keystore's cert.
+      #     ship an unknown-cert APK that breaks updates). EXPECTED_SHA256 is the
+      #     public certificate fingerprint of the project release key — it is not
+      #     secret (only the private key is), so hardcoding it here lets users
+      #     verify releases too (apksigner verify --print-certs).
       # ----------------------------------------------------------------------
-      - name: Verify the stable signing key
+      - name: Verify the release signing key
         if: steps.noop.outputs.skip != 'true'
         working-directory: ${{ env.UPSTREAM_DIR }}
         env:
-          EXPECTED_SHA256: "2da3533b19dc9a61f7edc8806919dc61017848635b20cf3ad8716f426a273d41"
+          EXPECTED_SHA256: "0cbb8c06f1a5f6a191c820932bab7cd497bce69307edde26cd45aa2514a71ec8"
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/minimal/debug/app-minimal-debug.apk"
@@ -380,10 +415,10 @@ jobs:
             | grep -oiE '[0-9a-f]{64}' | tr '[:upper:]' '[:lower:]')"
           echo "Signer cert SHA-256: ${GOT:-<none>}"
           if [ "${GOT}" != "${EXPECTED_SHA256}" ]; then
-            echo "::error::APK signed with unexpected key ${GOT:-<none>} (expected ${EXPECTED_SHA256}); stable signing regressed"
+            echo "::error::APK signed with unexpected key ${GOT:-<none>} (expected ${EXPECTED_SHA256}); signing key regressed"
             exit 1
           fi
-          echo "Verified: APK is signed with the stable committed debug key"
+          echo "Verified: APK is signed with the project release key"
 
       # ----------------------------------------------------------------------
       # 10. Derive the human upstream version (YYYY.M.P) from
@@ -473,8 +508,9 @@ jobs:
             echo "### What this build is"
             echo
             echo "- Flavor/type: \`minimal/debug\` (FOSS, no Google Play Services -"
-            echo "  the same flavor F-Droid ships), **debug-signed** with the public"
-            echo "  universal Android debug keystore. No private signing key is used."
+            echo "  the same flavor F-Droid ships). Signed with the project's own"
+            echo "  **self-signed release key** (private to the maintainer, held in"
+            echo "  CI secrets) - not the public Android debug key."
             echo "- Built from upstream [\`${UPSTREAM_REPO}@${SHORT}\`](https://github.com/${UPSTREAM_REPO}/commit/${SHA})"
             echo "  plus exactly one patch:"
             echo "  [\`${PATCH_FILE}\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/${PATCH_FILE})"
@@ -498,6 +534,20 @@ jobs:
             echo '```'
             echo "sha256sum -c ${ASSET}.sha256"
             echo '```'
+            echo
+            echo "Confirm it was signed with the project release key:"
+            echo
+            echo '```'
+            echo "apksigner verify --print-certs ${ASSET}"
+            echo "# Signer #1 certificate SHA-256 digest:"
+            echo "# 0cbb8c06f1a5f6a191c820932bab7cd497bce69307edde26cd45aa2514a71ec8"
+            echo '```'
+            echo
+            echo "> **Updating from an early build (before this signing change)?** The"
+            echo "> project switched from a throwaway/committed key to its own private"
+            echo "> release key. If Android refuses to install over an existing copy with"
+            echo "> a signature error, uninstall the old one once, then install this. All"
+            echo "> later updates install in place."
             echo
             echo "### Known limitation: federated Google / Microsoft sign-in"
             echo

@@ -11,3 +11,9 @@ patch-apply.log
 
 # macOS
 .DS_Store
+
+# Never commit a signing keystore (the release key is private; CI gets it from a secret)
+*.jks
+*.keystore
+keystore/*.jks
+keystore/*.keystore

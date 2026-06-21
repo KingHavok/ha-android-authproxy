@@ -33,7 +33,7 @@ This project ships the **standard, unmodified Home Assistant app** with **one sm
 It is for self-hosters who:
 
 - Sit Home Assistant behind an OIDC/OAuth2 auth proxy such as **Cloudflare Access, Authelia, Authentik, Vouch, or oauth2-proxy**, and
-- Are comfortable **sideloading a debug-signed APK** and reading/verifying the change (or building it themselves).
+- Are comfortable **sideloading a self-signed APK** and reading/verifying the change (or building it themselves).
 
 If you don't run an auth proxy, you don't need this — use the official app from Google Play or [F-Droid](https://f-droid.org/packages/io.homeassistant.companion.android.minimal/).
 
@@ -109,7 +109,16 @@ The patch is a `git format-patch` file, so it preserves the original author, com
 
 This app holds your **Home Assistant long-lived auth token**. Installing a third-party build of an app like that is a real trust decision, so here is the honest picture:
 
-- **It is debug-signed, with a fixed key.** Releases are signed with a **debug keystore committed to this repo** ([`keystore/debug.keystore`](keystore/debug.keystore)), using the well-known debug credentials (alias `androiddebugkey`, password `android`). That keystore is **public and not secret** by design, so a debug signature proves **nothing** about who built the APK and is **no** supply-chain guarantee — treat the **build process** (below) and the **patch** as the things to verify, not the signature. The reason it's a *fixed* key rather than a throwaway is purely practical: every release is signed identically, so Android installs updates **in place** (no uninstall/reinstall between versions) and you only have to clear Google Play Protect once. (See [Installing](#installing) for the Play Protect steps.)
+- **Signed with the project's private release key.** Releases are signed with a dedicated, **self-signed** key (`CN=ha-android-authproxy`, certificate SHA-256 `0cbb8c06f1a5f6a191c820932bab7cd497bce69307edde26cd45aa2514a71ec8`) held only by the maintainer — it lives in this repo's CI secrets and is **not committed**. What that means:
+    - It is **self-signed** (no certificate authority), so it is **not** a trust anchor for a first install — it shows a build came from the key-holder, not that the code is safe. The things to verify remain the **patch** and the **build process**, not the signature. You *can* confirm a download carries the project key:
+
+      ```sh
+      apksigner verify --print-certs ha-android-authproxy-*.apk
+      # Signer #1 certificate SHA-256 digest: 0cbb8c06f1a5f6a191c820932bab7cd497bce69307edde26cd45aa2514a71ec8
+      ```
+
+    - It **does** protect updates. Android only installs an update over an existing install if both are signed with the **same** key. Because only the maintainer holds this private key, a modified APK from anywhere else **cannot** masquerade as an in-place update to an installed copy. (An earlier version of this project signed with a *committed, public* debug key — which let anyone forge a matching-signature "update." It was replaced precisely to close that gap.)
+    - Because every release shares this one key, genuine updates install **in place** (no uninstall between versions) and you only clear Google Play Protect **once**. (See [Installing](#installing).)
 - **It holds your HA auth token.** The token-bearing JavaScript bridge is the most sensitive surface in the app. This patch is deliberately narrow and is designed to keep that bridge anchored to your real Home Assistant origin, consistent with the hardening direction of [#6733](https://github.com/home-assistant/android/pull/6733). It does not add new token handling.
 - **Read the patch.** The complete change is **one short file**: [`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch). Three files, ~61 lines. You can read it in a few minutes. Every other source file in a release is **unchanged upstream Home Assistant** — the patch is the only modification to the source. (The compiled APK isn't byte-identical to a stock build — see [why your APK won't match our SHA-256](#why-your-apk-wont-match-our-sha-256-and-thats-fine) — but the *source diff* is exactly this patch and nothing else.)
 - **Build it yourself.** You don't have to trust the published APK at all. The [build instructions](#building-it-yourself) let you reproduce a release from the exact upstream commit it names. The workflow that produces releases is in this repo in full — there is nothing hidden.
@@ -162,7 +171,7 @@ adb install -r ha-android-authproxy-<VERSION>-g<SHORT>-minimal-debug.apk
 
 The `-r` reinstalls/upgrades in place, preserving the app's data.
 
-> **Why the Play Protect warning happens at all:** this APK is **debug-signed** (with the public, universal Android debug key) rather than signed by a registered Play developer, and it didn't come from the Play Store. Play Protect warns on every such app. The warning speaks to the *distribution channel*, not to anything the app does — which is why [Trust and security](#trust-and-security) (above) covers how to read the patch and build it yourself.
+> **Why the Play Protect warning happens at all:** this APK is **self-signed** (with the project's own key, not a registered Play developer certificate) and didn't come from the Play Store. Play Protect warns on every such app. The warning speaks to the *distribution channel* and an unrecognized signing certificate, not to anything the app does — which is why [Trust and security](#trust-and-security) (above) covers how to read the patch and build it yourself.
 
 ### It coexists with the Play Store app
 
@@ -256,16 +265,17 @@ A clean build is **roughly 60 MB** — about the same as the released APK. It ca
 
 A locally built APK is **not** byte-for-byte identical to the published one, so its SHA-256 **will not match** — this is expected, not a failed build. Every difference is build-environment metadata, not code:
 
-- **Signing key** — your build is signed with *your* machine's debug keystore; ours uses the fixed [`keystore/debug.keystore`](keystore/debug.keystore) committed here. Different certificate → different bytes.
+- **Signing key** — your build is signed with *your* machine's debug key; our releases are signed with the **project's private release key**, which is held in CI secrets and is deliberately **not** in this repo. Different certificate → different bytes. (This also means your self-build **cannot** install in place over one of our releases — by design: only the project key can produce installable updates.)
 - **Version string** — `reckon` embeds a different version locally (a `…-SNAPSHOT`) than in CI (a `…-beta`).
 - **Timestamps, build paths, and native debug-symbol stripping** — all differ between machines.
 
-The published `.sha256` is only for checking that your **download of our APK** arrived intact — it is **not** a reproducibility check. To confirm a release is the same *code* you built, compare the **contents**, not the whole-file hash: the `classes*.dex` (app code), `lib/**/*.so` (native libraries), and the declared permissions all match, apart from the embedded version string and stripped debug symbols.
+The published `.sha256` is only for checking that your **download of our APK** arrived intact — it is **not** a reproducibility check. To confirm a release is the same *code* you built, compare the **contents**, not the whole-file hash: the `classes*.dex` (app code), `lib/**/*.so` (native libraries), and the declared permissions all match, apart from the embedded version string and stripped debug symbols. To confirm a downloaded release came from the project key, check its certificate with `apksigner verify --print-certs` (see [Trust and security](#trust-and-security)).
 
-If you want your build to carry the **same signature** as our releases — so it can even update in place over an installed release — build with the committed keystore via the same init script CI uses:
+If you maintain your own fork and want *your* builds to update in place as their own line, generate your own keystore and point the same init script at it (this is exactly what CI does):
 
 ```sh
-AUTHPROXY_KEYSTORE=/path/to/ha-android-authproxy/keystore/debug.keystore \
+AUTHPROXY_KEYSTORE=/path/to/your-release.jks \
+AUTHPROXY_KEYSTORE_PASS=... AUTHPROXY_KEY_ALIAS=... AUTHPROXY_KEY_PASS=... \
   ./gradlew :app:assembleMinimalDebug \
   --init-script /path/to/ha-android-authproxy/keystore/signing-override.init.gradle
 ```
