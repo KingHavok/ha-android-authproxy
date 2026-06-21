@@ -204,7 +204,7 @@ You'll get a notification each time the auto-build publishes a new release.
 
 ## Building it yourself
 
-You can reproduce any release locally from the exact upstream commit it names. This is the strongest way to trust a build — you don't have to trust the published APK at all.
+You can rebuild any release locally from the exact source it was made from — the upstream commit named in its tag, plus the one patch in this repo. This is the strongest way to trust a build: you compile it yourself from code you can read, so you don't have to trust the published APK at all. (Your APK will **not** be byte-identical to ours, and that's expected — see [below](#why-your-apk-wont-match-our-sha-256-and-thats-fine).)
 
 ### Prerequisites
 
@@ -237,7 +237,10 @@ git am --3way /path/to/ha-android-authproxy/patches/0001-auth-proxy-redirect-sup
 cp .github/mock-google-services.json app/google-services.json
 
 # 5. Build the FOSS minimal debug APK.
-#    -Preckon.stage=beta is only needed in CI; harmless locally.
+#    Do NOT pass -Preckon.stage=beta locally — that's a CI-only setting. Locally
+#    reckon runs in snapshot mode and that stage errors ("Stage beta is not one
+#    of: [final, snapshot]"). CI sets it because GitHub defines CI=true, which
+#    switches reckon to staged mode.
 ./gradlew :app:assembleMinimalDebug
 ```
 
@@ -247,9 +250,25 @@ The APK lands at:
 app/build/outputs/apk/minimal/debug/app-minimal-debug.apk
 ```
 
-(~77 MB, auto-signed with the Android debug keystore — **no signing secret required**.)
+A clean build is **roughly 60 MB** — about the same as the released APK. It can come out larger (~80 MB) if a previous incremental build left the native debug symbols in `libmicrowakeword.so` unstripped; that's harmless (debug symbols only). It's auto-signed with **your own** machine's Android debug keystore — no signing secret required.
 
-You can compare the SHA-256 of your locally built APK against the checksum published with the release to confirm you've reproduced it.
+### Why your APK won't match our SHA-256 (and that's fine)
+
+A locally built APK is **not** byte-for-byte identical to the published one, so its SHA-256 **will not match** — this is expected, not a failed build. Every difference is build-environment metadata, not code:
+
+- **Signing key** — your build is signed with *your* machine's debug keystore; ours uses the fixed [`keystore/debug.keystore`](keystore/debug.keystore) committed here. Different certificate → different bytes.
+- **Version string** — `reckon` embeds a different version locally (a `…-SNAPSHOT`) than in CI (a `…-beta`).
+- **Timestamps, build paths, and native debug-symbol stripping** — all differ between machines.
+
+The published `.sha256` is only for checking that your **download of our APK** arrived intact — it is **not** a reproducibility check. To confirm a release is the same *code* you built, compare the **contents**, not the whole-file hash: the `classes*.dex` (app code), `lib/**/*.so` (native libraries), and the declared permissions all match, apart from the embedded version string and stripped debug symbols.
+
+If you want your build to carry the **same signature** as our releases — so it can even update in place over an installed release — build with the committed keystore via the same init script CI uses:
+
+```sh
+AUTHPROXY_KEYSTORE=/path/to/ha-android-authproxy/keystore/debug.keystore \
+  ./gradlew :app:assembleMinimalDebug \
+  --init-script /path/to/ha-android-authproxy/keystore/signing-override.init.gradle
+```
 
 > **CMake / NDK note.** The native `:microwakeword` module needs a specific **CMake** and **NDK** version, pinned in upstream `gradle/libs.versions.toml` as `cmake` and `androidNdk` (at the time of writing, `cmake = "4.1.2"` and `androidNdk = "29.0.14206865"`, but read the file — upstream bumps these). If your build fails with `[CXX1300] CMake '…' was not found`, install the exact versions named there:
 >
