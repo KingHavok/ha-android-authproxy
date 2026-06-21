@@ -9,17 +9,17 @@ This repository does **not** contain a fork of the Home Assistant app. It contai
 ## Table of contents
 
 - [What this is and who it's for](#what-this-is-and-who-its-for)
+- [What works, and the federated-login limitation](#what-works-and-the-federated-login-limitation)
 - [The problem it solves](#the-problem-it-solves)
 - [Exactly what is modified](#exactly-what-is-modified)
-- [What works, and the federated-login limitation](#what-works-and-the-federated-login-limitation)
-- [Why this isn't in Home Assistant core](#why-this-isnt-in-home-assistant-core-and-may-not-ever-be)
 - [Trust and security](#trust-and-security)
 - [Installing](#installing)
 - [Versioning](#versioning)
-- [How the auto-build works](#how-the-auto-build-works)
 - [How to get notified of new releases](#how-to-get-notified-of-new-releases)
 - [Building it yourself](#building-it-yourself)
+- [How the auto-build works](#how-the-auto-build-works)
 - [For contributors: updating the patch when upstream breaks it](#for-contributors-updating-the-patch-when-upstream-breaks-it)
+- [Why this isn't in Home Assistant core](#why-this-isnt-in-home-assistant-core-and-may-not-ever-be)
 - [Disclaimers and attribution](#disclaimers-and-attribution)
 
 ---
@@ -36,6 +36,35 @@ It is for self-hosters who:
 - Are comfortable **sideloading a debug-signed APK** and reading/verifying the change (or building it themselves).
 
 If you don't run an auth proxy, you don't need this — use the official app from Google Play or [F-Droid](https://f-droid.org/packages/io.homeassistant.companion.android.minimal/).
+
+---
+
+## What works, and the federated-login limitation
+
+**Check this before you install** — one specific setup (Google/Microsoft *federated* sign-in) cannot be made to work by this or any client-side patch, so confirm your login factor is supported here first.
+
+**What works:** connecting through a proxy that challenges you **before** you reach Home Assistant, including:
+
+- **Cloudflare Access**
+- **Authelia**
+- **Authentik**
+- **Vouch**
+- **oauth2-proxy**
+
+…using a login factor the proxy can render inside an embedded WebView (see below). Onboarding, normal use, and token refresh all complete in-app.
+
+### The Google / Microsoft federated-login limitation
+
+> **Google and Microsoft federated sign-in will not work in this app — and cannot be fixed by this patch.**
+
+If your proxy delegates the actual login to **"Sign in with Google"** or **"Sign in with Microsoft"**, those providers **refuse to render in any embedded WebView** and return **`Error 403: disallowed_useragent`**. This is a **published, deliberate Google/Microsoft policy** that blocks OAuth flows inside embedded WebViews across all apps. It is not a bug in this patch, and no client-side patch can override it.
+
+**Workarounds** (pick one):
+
+1. **Use a non-federated factor on the proxy** for the app — e.g. **email OTP, TOTP, or WebAuthn / passkeys** instead of Google/Microsoft SSO.
+2. **Put a self-hosted identity provider in front** (Authelia, Authentik, Keycloak, etc.) that can render its own login form in a WebView, even if it federates to Google/Microsoft for browser logins.
+
+In short: anything that draws its **own** login UI works; anything that bounces you to Google's or Microsoft's hosted consent screen does not.
 
 ---
 
@@ -76,69 +105,6 @@ The patch is a `git format-patch` file, so it preserves the original author, com
 
 ---
 
-## What works, and the federated-login limitation
-
-**What works:** connecting through a proxy that challenges you **before** you reach Home Assistant, including:
-
-- **Cloudflare Access**
-- **Authelia**
-- **Authentik**
-- **Vouch**
-- **oauth2-proxy**
-
-…using a login factor the proxy can render inside an embedded WebView (see below). Onboarding, normal use, and token refresh all complete in-app.
-
-### The Google / Microsoft federated-login limitation
-
-> **Google and Microsoft federated sign-in will not work in this app — and cannot be fixed by this patch.**
-
-If your proxy delegates the actual login to **"Sign in with Google"** or **"Sign in with Microsoft"**, those providers **refuse to render in any embedded WebView** and return **`Error 403: disallowed_useragent`**. This is a **published, deliberate Google/Microsoft policy** that blocks OAuth flows inside embedded WebViews across all apps. It is not a bug in this patch, and no client-side patch can override it.
-
-**Workarounds** (pick one):
-
-1. **Use a non-federated factor on the proxy** for the app — e.g. **email OTP, TOTP, or WebAuthn / passkeys** instead of Google/Microsoft SSO.
-2. **Put a self-hosted identity provider in front** (Authelia, Authentik, Keycloak, etc.) that can render its own login form in a WebView, even if it federates to Google/Microsoft for browser logins.
-
-In short: anything that draws its **own** login UI works; anything that bounces you to Google's or Microsoft's hosted consent screen does not.
-
----
-
-## Why this isn't in Home Assistant core (and may not ever be)
-
-If you found this repo, you probably already discovered that the "right" way to do this — get the Android companion app to work behind an OIDC/OAuth2 auth proxy — was proposed upstream and turned down. That's not a conspiracy, and this section isn't a complaint. It's an attempt to explain the situation honestly so you can set realistic expectations.
-
-### What the maintainers actually said
-
-Two pull requests against the Android app were closed, not merged. In [home-assistant/android#6725](https://github.com/home-assistant/android/pull/6725), maintainer TimoPtr closed the feature with:
-
-> "All of these tickets are being closed because we are not planning to add support for external authentication providers at the Android app level. This is a broader architectural concern that needs to be addressed at the Home Assistant core level rather than within a single client... support for standards like OIDC would need to be implemented in core first and then leveraged by clients, including Android."
-
-He also cited WebView attack surface (the JavaScript bridge that carries auth tokens) and noted mTLS and VPN as the recommended paths. A second PR, [home-assistant/android#6733](https://github.com/home-assistant/android/pull/6733), hardened that token-bearing bridge — and was *also* declined, on the grounds that it is "only relevant if we ever allow loading an url that is not Home Assistant." In other words: fix the client only after core leads, and core hasn't.
-
-### The architectural reason
-
-"Do it in core first" is a real ask, not a deflection. Core today documents exactly three auth providers — `homeassistant` (local username/password), `trusted_networks` (an IP allowlist), and `command_line` ([docs](https://www.home-assistant.io/docs/authentication/providers/)). None is an external-IdP or OIDC client. Core's auth is built on OAuth2 plus IndieAuth, where credentials are validated *only at login*; after that, a refresh/access-token pair is issued and subsequent requests rely on those tokens without re-checking any upstream provider ([auth API](https://developers.home-assistant.io/docs/auth_api/)).
-
-That design produces the maintainers' most-cited objection. As quoted in [architecture#832](https://github.com/home-assistant/architecture/issues/832), balloob (Paulus Schoutsen) asked "how do we want to deal with users that are no longer allowed to log in?" — because a user disabled at an external IdP can stay authenticated until their token expires (access tokens last 30 minutes, but long-lived tokens last 10 years). Earlier core PRs to add OpenID Connect ([#32926](https://github.com/home-assistant/core/pull/32926)) and LDAP ([#37645](https://github.com/home-assistant/core/pull/37645)) were both closed unmerged, with balloob noting "Every bug could end up with a system that can be accessed unauthorized." The other recurring theme is ownership: when a header-auth PR ([#38175](https://github.com/home-assistant/core/pull/38175)) was proposed, balloob declined it because "the moment we accept this PR, it becomes our responsibility." Bolting a federated IdP onto this single-client token model isn't a small patch — it would mean rethinking how and when core re-validates identity.
-
-### The philosophical reason
-
-Home Assistant and the Open Home Foundation are explicitly local-first and privacy-first. The Foundation's values are privacy, choice, and sustainability, and the [Open Home manifesto](https://www.home-assistant.io/blog/2021/12/23/the-open-home/) states "Devices need to work locally" and that a cloud connection "should be extra and opt-in." Schoutsen's ["Local = Reliable"](https://newsletter.openhomefoundation.org/local-equals-reliable/) argues that "your smart home shouldn't be beholden to anything outside of your home to function."
-
-A federated or cloud identity provider is, structurally, exactly the kind of external dependency that stance is wary of. Maintainer frenck made the connection directly in [architecture#832](https://github.com/home-assistant/architecture/issues/832): external auth "works a little against the core values (local vs remote in auth)," adding "I am pretty sure my dad... isn't using SSO to log in to his home devices." *(Inference, clearly labeled: I read the reluctance as a coherent extension of the local-first philosophy rather than indifference — though note other commenters in that same thread disputed the "average user" framing, pointing out that plenty of self-hosters do run Keycloak or Authentik at home.)*
-
-### Speculation (clearly labeled)
-
-Here's the part that is *my read, not a documented fact.* Home Assistant's officially recommended remote-access path is Home Assistant Cloud (Nabu Casa), which sells secure remote access without opening ports (a low monthly subscription) and whose subscriptions, by the project's own [docs](https://www.home-assistant.io/docs/configuration/securing/), "help fund the development of Home Assistant itself" and support the Open Home Foundation. Speculatively, a project whose blessed remote-access path is also its funding model may have weaker incentive to make DIY reverse-proxy + OIDC setups first-class.
-
-I want to be explicit: **this is speculation, not evidence of bad faith.** No source asserts a revenue motive, no documented Nabu Casa product gates HA behind an external auth proxy, and the stated technical reasons — token revocation, attack surface, maintenance ownership — may be the whole story. They are coherent and sufficient on their own.
-
-### Takeaway
-
-That's why this repo exists: to give self-hosters the OIDC-proxy path that core doesn't natively support today — and it would become unnecessary the day Home Assistant core ships a first-class external-IdP/OIDC auth provider that the clients can simply use.
-
----
-
 ## Trust and security
 
 This app holds your **Home Assistant long-lived auth token**. Installing a third-party build of an app like that is a real trust decision, so here is the honest picture:
@@ -150,7 +116,7 @@ This app holds your **Home Assistant long-lived auth token**. Installing a third
 - **Unaffiliated.** This project is **not affiliated with, endorsed by, or supported by Home Assistant, Nabu Casa, the Open Home Foundation, or any of the proxy/IdP vendors named above.**
 - **No warranty.** This is provided **as-is, with no warranty of any kind**. You run it at your own risk. If something breaks, you keep both pieces.
 
-If any of the above makes you uncomfortable, the right move is to [build it yourself](#building-it-yourself) or wait for upstream/HA core to support auth proxies natively.
+If you're satisfied, head to [Installing](#installing) below. If not, [build it yourself](#building-it-yourself) or wait for upstream/HA core to support auth proxies natively.
 
 ---
 
@@ -195,7 +161,7 @@ adb install -r ha-android-authproxy-<VERSION>-g<SHORT>-minimal-debug.apk
 
 The `-r` reinstalls/upgrades in place, preserving the app's data.
 
-> **Why the Play Protect warning happens at all:** this APK is **debug-signed** (with the public, universal Android debug key) rather than signed by a registered Play developer, and it didn't come from the Play Store. Play Protect warns on every such app. The warning speaks to the *distribution channel*, not to anything the app does — which is exactly why the [Trust and security](#trust-and-security) section tells you how to read the patch and build it yourself.
+> **Why the Play Protect warning happens at all:** this APK is **debug-signed** (with the public, universal Android debug key) rather than signed by a registered Play developer, and it didn't come from the Play Store. Play Protect warns on every such app. The warning speaks to the *distribution channel*, not to anything the app does — which is why [Trust and security](#trust-and-security) (above) covers how to read the patch and build it yourself.
 
 ### It coexists with the Play Store app
 
@@ -219,38 +185,6 @@ These combine into:
 | APK asset | `ha-android-authproxy-<VERSION>-g<SHORT>-minimal-debug.apk` | `ha-android-authproxy-2026.6.5-g63b0639-minimal-debug.apk` |
 
 So a tag like `v2026.6.5-authproxy-g63b0639` means: **Home Assistant 2026.6.5**, built from upstream commit **`63b0639`**, with the auth-proxy patch applied.
-
----
-
-## How the auto-build works
-
-The workflow at **[`.github/workflows/build-and-release.yml`](.github/workflows/build-and-release.yml)** drives everything. At a high level it:
-
-1. **Checks out this repo** (the patch + scripts).
-2. **Resolves upstream's latest `main` SHA** via the GitHub API.
-3. **No-op check.** If a release tag for that upstream SHA **already exists** on this repo, it exits `0` without rebuilding — unless the manual **`force`** input is set.
-4. **Clones upstream at that SHA *with tags*** (tags are required by the `reckon` versioning plugin, below).
-5. **Applies the patch** with a 3-way merge (`scripts/apply-patch.sh`). If it no longer applies cleanly, the workflow **opens/refreshes a GitHub issue** containing the conflict/reject detail and **fails** — see the [contributor section](#for-contributors-updating-the-patch-when-upstream-breaks-it).
-6. **Installs the right CMake and NDK.** Both versions are read **dynamically** from upstream `gradle/libs.versions.toml` (`cmake` and `androidNdk`) — *not* hardcoded — and installed via `sdkmanager` (accepting licenses) **before** the Gradle build, so the native `:microwakeword` module builds. This is required because the GitHub-hosted runner has the Android SDK but not the pinned CMake, and the build otherwise fails with `[CXX1300] CMake '…' was not found`.
-7. **Provides a mock `google-services.json`.** The `google-services` Gradle plugin runs even for the FOSS `minimal` flavor and fails if the file is missing, so upstream's `.github/mock-google-services.json` is copied to `app/google-services.json` (module-root location, covering all flavor/buildType combos).
-8. **Builds** `:app:assembleMinimalDebug` with **JDK 21** and `-Preckon.stage=beta` (see note below).
-9. **Renames the APK**, computes the version + tag, generates release notes, and creates the GitHub Release with the APK and its SHA-256 checksum, marked as **latest**.
-
-**Triggers:** a daily `schedule` (a quiet UTC hour, to pick up upstream changes), `workflow_dispatch` (with the `force` boolean to rebuild even when unchanged), and `push` to this repo's `main` (so editing the patch rebuilds). A **concurrency group** prevents overlapping runs.
-
-**Permissions:** the minimum needed — `contents: write` (create the tag/release) and `issues: write` (alert on patch failure). It uses the built-in `GITHUB_TOKEN`; no personal access token is required, since everything is on this repo plus public read of upstream.
-
-> **Note on `reckon`:** upstream's `reckon` Gradle plugin computes the project version from git tags, and in CI (where the `CI` env var is present, as GitHub Actions sets it) it selects a staged scheme that **requires** a *stage*. Passing `-Preckon.stage=beta` satisfies it. Unsetting `CI` does **not** help — Gradle sees the variable as present even when empty (`environmentVariable("CI").isPresent` is `true`). This is also why the upstream clone must include tags: reckon needs an existing tag as its base version. The resulting reckon version string is irrelevant here; release names come from the [versioning](#versioning) scheme above.
-
-### Enabling the workflow (first run)
-
-When you first create this repository, GitHub registers the `schedule` and `workflow_dispatch` triggers only once the workflow file is present on the **default branch** (`main`). After the initial push:
-
-1. Open the **Actions** tab.
-2. Select the **build-and-release** workflow.
-3. Click **Run workflow** (this is `workflow_dispatch`) to produce the first release immediately, rather than waiting for the next scheduled run.
-
-On a brand-new repo there are no releases yet, so the no-op check finds nothing and the first run always builds. After that, the daily schedule takes over and only builds when upstream `main` advances (or when you push a patch change).
 
 ---
 
@@ -328,6 +262,38 @@ You can compare the SHA-256 of your locally built APK against the checksum publi
 
 ---
 
+## How the auto-build works
+
+The workflow at **[`.github/workflows/build-and-release.yml`](.github/workflows/build-and-release.yml)** drives everything. At a high level it:
+
+1. **Checks out this repo** (the patch + scripts).
+2. **Resolves upstream's latest `main` SHA** via the GitHub API.
+3. **No-op check.** If a release tag for that upstream SHA **already exists** on this repo, it exits `0` without rebuilding — unless the manual **`force`** input is set.
+4. **Clones upstream at that SHA *with tags*** (tags are required by the `reckon` versioning plugin, below).
+5. **Applies the patch** with a 3-way merge (`scripts/apply-patch.sh`). If it no longer applies cleanly, the workflow **opens/refreshes a GitHub issue** containing the conflict/reject detail and **fails** — see the [contributor section](#for-contributors-updating-the-patch-when-upstream-breaks-it).
+6. **Installs the right CMake and NDK.** Both versions are read **dynamically** from upstream `gradle/libs.versions.toml` (`cmake` and `androidNdk`) — *not* hardcoded — and installed via `sdkmanager` (accepting licenses) **before** the Gradle build, so the native `:microwakeword` module builds. This is required because the GitHub-hosted runner has the Android SDK but not the pinned CMake, and the build otherwise fails with `[CXX1300] CMake '…' was not found`.
+7. **Provides a mock `google-services.json`.** The `google-services` Gradle plugin runs even for the FOSS `minimal` flavor and fails if the file is missing, so upstream's `.github/mock-google-services.json` is copied to `app/google-services.json` (module-root location, covering all flavor/buildType combos).
+8. **Builds** `:app:assembleMinimalDebug` with **JDK 21** and `-Preckon.stage=beta` (see note below).
+9. **Renames the APK**, computes the version + tag, generates release notes, and creates the GitHub Release with the APK and its SHA-256 checksum, marked as **latest**.
+
+**Triggers:** a daily `schedule` (a quiet UTC hour, to pick up upstream changes), `workflow_dispatch` (with the `force` boolean to rebuild even when unchanged), and `push` to this repo's `main` (so editing the patch rebuilds). A **concurrency group** prevents overlapping runs.
+
+**Permissions:** the minimum needed — `contents: write` (create the tag/release) and `issues: write` (alert on patch failure). It uses the built-in `GITHUB_TOKEN`; no personal access token is required, since everything is on this repo plus public read of upstream.
+
+> **Note on `reckon`:** upstream's `reckon` Gradle plugin computes the project version from git tags, and in CI (where the `CI` env var is present, as GitHub Actions sets it) it selects a staged scheme that **requires** a *stage*. Passing `-Preckon.stage=beta` satisfies it. Unsetting `CI` does **not** help — Gradle sees the variable as present even when empty (`environmentVariable("CI").isPresent` is `true`). This is also why the upstream clone must include tags: reckon needs an existing tag as its base version. The resulting reckon version string is irrelevant here; release names come from the [versioning](#versioning) scheme above.
+
+### Enabling the workflow (first run)
+
+When you first create this repository, GitHub registers the `schedule` and `workflow_dispatch` triggers only once the workflow file is present on the **default branch** (`main`). After the initial push:
+
+1. Open the **Actions** tab.
+2. Select the **build-and-release** workflow.
+3. Click **Run workflow** (this is `workflow_dispatch`) to produce the first release immediately, rather than waiting for the next scheduled run.
+
+On a brand-new repo there are no releases yet, so the no-op check finds nothing and the first run always builds. After that, the daily schedule takes over and only builds when upstream `main` advances (or when you push a patch change).
+
+---
+
 ## For contributors: updating the patch when upstream breaks it
 
 Because the patch is applied on top of a **moving** upstream `main`, upstream will eventually refactor one of the three touched files and the patch will stop applying. When that happens the auto-build **opens (or refreshes) a GitHub issue** with the conflict/reject output and fails — that's the signal to update the patch.
@@ -361,6 +327,44 @@ Commit the regenerated patch to this repo's `main`; the `push` trigger rebuilds 
 
 - **`scripts/apply-patch.sh`** — applies the patch to a checked-out upstream tree with a 3-way merge; exits non-zero with the conflict detail on failure.
 - **`scripts/derive-version.sh`** — echoes the upstream `YYYY.M.P` version from `changelog_master.xml`.
+
+---
+
+## Why this isn't in Home Assistant core (and may not ever be)
+
+*Background — not required to use the app. Skip it if you just want the build working; read on if you want to understand why this repo has to exist.*
+
+As noted earlier, the "right" way to do this — get the Android companion app to work behind an OIDC/OAuth2 auth proxy — was [proposed upstream](https://github.com/home-assistant/android/pull/6725) and turned down (along with the [security hardening](https://github.com/home-assistant/android/pull/6733) that would have accompanied it). That's not a conspiracy, and this section isn't a complaint. It's an attempt to explain the situation honestly so you can set realistic expectations.
+
+### What the maintainers actually said
+
+Two pull requests against the Android app were closed, not merged. In [home-assistant/android#6725](https://github.com/home-assistant/android/pull/6725), maintainer TimoPtr closed the feature with:
+
+> "All of these tickets are being closed because we are not planning to add support for external authentication providers at the Android app level. This is a broader architectural concern that needs to be addressed at the Home Assistant core level rather than within a single client... support for standards like OIDC would need to be implemented in core first and then leveraged by clients, including Android."
+
+He also cited WebView attack surface (the JavaScript bridge that carries auth tokens) and noted mTLS and VPN as the recommended paths. A second PR, [home-assistant/android#6733](https://github.com/home-assistant/android/pull/6733), hardened that token-bearing bridge — and was *also* declined, on the grounds that it is "only relevant if we ever allow loading an url that is not Home Assistant." In other words: fix the client only after core leads, and core hasn't.
+
+### The architectural reason
+
+"Do it in core first" is a real ask, not a deflection. Core today documents exactly three auth providers — `homeassistant` (local username/password), `trusted_networks` (an IP allowlist), and `command_line` ([docs](https://www.home-assistant.io/docs/authentication/providers/)). None is an external-IdP or OIDC client. Core's auth is built on OAuth2 plus IndieAuth, where credentials are validated *only at login*; after that, a refresh/access-token pair is issued and subsequent requests rely on those tokens without re-checking any upstream provider ([auth API](https://developers.home-assistant.io/docs/auth_api/)).
+
+That design produces the maintainers' most-cited objection. As quoted in [architecture#832](https://github.com/home-assistant/architecture/issues/832), balloob (Paulus Schoutsen) asked "how do we want to deal with users that are no longer allowed to log in?" — because a user disabled at an external IdP can stay authenticated until their token expires (access tokens last 30 minutes, but long-lived tokens last 10 years). Earlier core PRs to add OpenID Connect ([#32926](https://github.com/home-assistant/core/pull/32926)) and LDAP ([#37645](https://github.com/home-assistant/core/pull/37645)) were both closed unmerged, with balloob noting "Every bug could end up with a system that can be accessed unauthorized." The other recurring theme is ownership: when a header-auth PR ([#38175](https://github.com/home-assistant/core/pull/38175)) was proposed, balloob declined it because "the moment we accept this PR, it becomes our responsibility." Bolting a federated IdP onto this single-client token model isn't a small patch — it would mean rethinking how and when core re-validates identity.
+
+### The philosophical reason
+
+Home Assistant and the Open Home Foundation are explicitly local-first and privacy-first. The Foundation's values are privacy, choice, and sustainability, and the [Open Home manifesto](https://www.home-assistant.io/blog/2021/12/23/the-open-home/) states "Devices need to work locally" and that a cloud connection "should be extra and opt-in." Schoutsen's ["Local = Reliable"](https://newsletter.openhomefoundation.org/local-equals-reliable/) argues that "your smart home shouldn't be beholden to anything outside of your home to function."
+
+A federated or cloud identity provider is, structurally, exactly the kind of external dependency that stance is wary of. Maintainer frenck made the connection directly in [architecture#832](https://github.com/home-assistant/architecture/issues/832): external auth "works a little against the core values (local vs remote in auth)," adding "I am pretty sure my dad... isn't using SSO to log in to his home devices." *(Inference, clearly labeled: I read the reluctance as a coherent extension of the local-first philosophy rather than indifference — though note other commenters in that same thread disputed the "average user" framing, pointing out that plenty of self-hosters do run Keycloak or Authentik at home.)*
+
+### Speculation (clearly labeled)
+
+Here's the part that is *my read, not a documented fact.* Home Assistant's officially recommended remote-access path is Home Assistant Cloud (Nabu Casa), which sells secure remote access without opening ports (a low monthly subscription) and whose subscriptions, by the project's own [docs](https://www.home-assistant.io/docs/configuration/securing/), "help fund the development of Home Assistant itself" and support the Open Home Foundation. Speculatively, a project whose blessed remote-access path is also its funding model may have weaker incentive to make DIY reverse-proxy + OIDC setups first-class.
+
+I want to be explicit: **this is speculation, not evidence of bad faith.** No source asserts a revenue motive, no documented Nabu Casa product gates HA behind an external auth proxy, and the stated technical reasons — token revocation, attack surface, maintenance ownership — may be the whole story. They are coherent and sufficient on their own.
+
+### Takeaway
+
+That's why this repo exists: to give self-hosters the OIDC-proxy path that core doesn't natively support today — and it would become unnecessary the day Home Assistant core ships a first-class external-IdP/OIDC auth provider that the clients can simply use.
 
 ---
 
