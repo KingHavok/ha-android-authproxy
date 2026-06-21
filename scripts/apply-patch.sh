@@ -65,6 +65,20 @@ log "upstream tree : $(pwd -P)"
 log "patch file    : ${PATCH_FILE}"
 log "upstream HEAD : $(git rev-parse --short HEAD 2>/dev/null || echo '<unknown>')"
 
+# --- ensure a committer identity exists -------------------------------------
+# `git am` (and the commit in the fallback path) need a committer identity.
+# A fresh CI runner has none configured, which makes `git am` fail outright —
+# the patch would then only reach the working tree uncommitted, leaving a DIRTY
+# repo that trips tools like reckon ("cannot release a significant stage without
+# a clean repo"). Set a repo-local identity if (and only if) none is configured,
+# so we never clobber a real user's global config.
+if ! git config user.email >/dev/null 2>&1; then
+  git config user.email "ha-android-authproxy@users.noreply.github.com"
+fi
+if ! git config user.name >/dev/null 2>&1; then
+  git config user.name "ha-android-authproxy build"
+fi
+
 # --- idempotency: is the patch already applied? -----------------------------
 # If reversing the patch would apply cleanly, the changes are already in the tree.
 if git apply --reverse --check "${PATCH_FILE}" >/dev/null 2>&1; then
@@ -126,7 +140,11 @@ fi
 log "'git am --3way' did not apply cleanly; aborting it and trying 'git apply --3way'."
 git am --abort >/dev/null 2>&1 || true
 
-# --- attempt 2: git apply --3way (applies the diff, no commit) --------------
+# --- attempt 2: git apply --3way, then COMMIT the result --------------------
+# Used only if `git am` could not proceed. `git apply` writes the diff to the
+# working tree/index but does NOT commit, which would leave the repo dirty.
+# We commit the applied changes ourselves so the tree ends clean (matching the
+# `git am` path), which downstream build tooling (e.g. reckon) requires.
 log "attempting 'git apply --3way' ..."
 if git apply --3way --verbose "${PATCH_FILE}" 2>/dev/null; then
   # `git apply --3way` can exit 0 yet leave conflict markers on partial merges;
@@ -134,7 +152,20 @@ if git apply --3way --verbose "${PATCH_FILE}" 2>/dev/null; then
   if [ -n "$(git diff --name-only --diff-filter=U 2>/dev/null || true)" ]; then
     fail_with_conflict_detail "git apply --3way left unresolved conflicts"
   fi
-  log "applied via 'git apply --3way' (working tree modified, not committed)."
+  # Stage everything the patch touched and commit, so the work tree is clean.
+  git add -A
+  if git diff --cached --quiet; then
+    log "git apply produced no changes (already applied?) — nothing to commit."
+  else
+    # Reuse the patch's own subject line for the commit message when available.
+    SUBJECT="$(sed -n 's/^Subject: \(\[PATCH[^]]*\] \)\?//p' "${PATCH_FILE}" | head -n1)"
+    git commit -q -m "${SUBJECT:-Apply auth-proxy patch}"
+    log "applied via 'git apply --3way' and committed; new HEAD: $(git rev-parse --short HEAD)"
+  fi
+  # Final guard: the tree MUST be clean for downstream tooling.
+  if [ -n "$(git status --porcelain)" ]; then
+    fail_with_conflict_detail "work tree still dirty after git apply + commit"
+  fi
   exit 0
 fi
 
