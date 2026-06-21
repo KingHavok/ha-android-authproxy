@@ -1,0 +1,522 @@
+name: build-and-release
+
+# Why this workflow exists:
+#   This repo (KingHavok/ha-android-authproxy) ships ONLY a patch + scripts.
+#   On each run we clone upstream home-assistant/android@main, apply our
+#   auth-proxy patch, build the FOSS "minimal/debug" APK, and publish a
+#   GitHub Release. Debug build type = auto-signed with the universal Android
+#   debug keystore, so NO signing secret is required.
+
+# Triggers:
+#   * schedule  - daily at 06:17 UTC. A deliberately "off-grid" minute (not :00)
+#                 to dodge the top-of-the-hour stampede on GitHub's shared
+#                 schedulers (which delays/drops cron runs). 06:17 UTC is a quiet
+#                 window for both US and EU contributors, so an opened
+#                 patch-failure issue is seen within a working day.
+#   * workflow_dispatch - manual run, with a 'force' boolean to rebuild even when
+#                 the current upstream SHA already has a release (no-op override).
+#   * push to main - editing the patch / scripts here must trigger a rebuild,
+#                 even when the upstream SHA is unchanged, so a push always
+#                 bypasses the no-op check (see step 3).
+on: # yamllint disable-line rule:truthy
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if a release for the current upstream SHA already exists"
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches:
+      - main
+
+# Minimal permissions:
+#   contents: write -> create the release + git tag on THIS repo.
+#   issues:  write  -> open/refresh an alert issue when the patch no longer applies.
+# Everything else (upstream read, release upload) works with the default
+# GITHUB_TOKEN because upstream is public and the release lives on this repo.
+permissions:
+  contents: write
+  issues: write
+
+# Prevent overlapping runs (e.g. a push landing during a scheduled run) from
+# racing to create the same tag/release. Let an in-progress build finish rather
+# than cancelling it, so a near-complete release is not thrown away.
+concurrency:
+  group: build-and-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: home-assistant/android
+  UPSTREAM_BRANCH: main
+  PATCH_FILE: patches/0001-auth-proxy-redirect-support.patch
+  # Where upstream gets cloned inside the workspace.
+  UPSTREAM_DIR: upstream
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      # ----------------------------------------------------------------------
+      # 1. Check out THIS repo (the thin patch repo) into the default workspace.
+      #    Contains: patches/, scripts/, README, license. NOT the app source.
+      #    persist-credentials: false - we never push with the git credential;
+      #    all GitHub API/release calls use the explicit GH_TOKEN env below.
+      # ----------------------------------------------------------------------
+      - name: Check out patch repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # ----------------------------------------------------------------------
+      # 2. Resolve the latest upstream main commit SHA via the GitHub API.
+      #    We pin the whole build to this exact SHA for reproducibility and so
+      #    the no-op check and the release tag agree on one commit.
+      # ----------------------------------------------------------------------
+      - name: Resolve upstream main SHA
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Full 40-char SHA of upstream main's tip.
+          SHA="$(gh api "repos/${UPSTREAM_REPO}/commits/${UPSTREAM_BRANCH}" --jq '.sha')"
+          if [ -z "${SHA}" ]; then
+            echo "::error::Could not resolve upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} SHA"
+            exit 1
+          fi
+          SHORT="${SHA:0:7}"
+          echo "sha=${SHA}" >> "${GITHUB_OUTPUT}"
+          echo "short=${SHORT}" >> "${GITHUB_OUTPUT}"
+          echo "Upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} is at ${SHA} (g${SHORT})"
+
+      # ----------------------------------------------------------------------
+      # 3. No-op check: if a release tagged for THIS upstream SHA already exists
+      #    on this repo, skip the (expensive) build. We match on the -g<SHORT>
+      #    suffix in our tag scheme.
+      #    Two things bypass the no-op and force a rebuild:
+      #      * workflow_dispatch with force=true, and
+      #      * any push to main (editing the patch/scripts must rebuild even when
+      #        the upstream SHA is unchanged - that is the whole point of the
+      #        push trigger). The release step replaces an existing same-SHA
+      #        release in that case so re-tagging does not collide.
+      # ----------------------------------------------------------------------
+      - name: Check whether this upstream SHA was already released
+        id: noop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHORT: ${{ steps.upstream.outputs.short }}
+          FORCE: ${{ github.event.inputs.force }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          SKIP=false
+          if [ "${FORCE}" = "true" ]; then
+            echo "Force flag set - building regardless of existing releases."
+          elif [ "${EVENT_NAME}" = "push" ]; then
+            echo "Push event - rebuilding regardless of existing releases."
+          else
+            # List release tags on THIS repo; look for our -g<SHORT> marker.
+            # '|| true' so a repo with zero releases (gh exits non-zero) is fine.
+            EXISTING="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
+              --json tagName --jq '.[].tagName' 2>/dev/null || true)"
+            if printf '%s\n' "${EXISTING}" | grep -q -- "-g${SHORT}$"; then
+              echo "A release for upstream g${SHORT} already exists - nothing to do."
+              SKIP=true
+            else
+              echo "No release found for upstream g${SHORT} - proceeding to build."
+            fi
+          fi
+          echo "skip=${SKIP}" >> "${GITHUB_OUTPUT}"
+
+      # ----------------------------------------------------------------------
+      # 4. Clone upstream at the resolved SHA, WITH FULL HISTORY AND TAGS.
+      #    reckon (org.ajoberstar.reckon.settings) infers project.version by
+      #    walking history for the nearest *ancestor* tag of HEAD. A shallow
+      #    clone cuts that walk short, so reckon may not find a base version.
+      #    We use a blobless partial clone (--filter=blob:none): it brings the
+      #    complete commit graph + all tags (so reckon's ancestor walk always
+      #    succeeds) while fetching file blobs lazily only for the checkout we
+      #    actually build - far cheaper than a full clone, far safer than a
+      #    shallow one.
+      # ----------------------------------------------------------------------
+      - name: Clone upstream with full history and tags
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+        if: steps.noop.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          rm -rf "${UPSTREAM_DIR}"
+          # Blobless partial clone: full commit/tag history, blobs on demand.
+          git clone -q --filter=blob:none --no-checkout \
+            "https://github.com/${UPSTREAM_REPO}.git" "${UPSTREAM_DIR}"
+          cd "${UPSTREAM_DIR}"
+          # Ensure tags are present (clone brings them, but be explicit).
+          git fetch -q --tags origin
+          # Check out the exact upstream commit we resolved in step 2.
+          git checkout -q "${SHA}"
+          echo "Upstream checked out at ${SHA}; tags present:"
+          git tag | wc -l
+
+      # ----------------------------------------------------------------------
+      # 5. Apply our patch via the helper script (3-way merge). On failure,
+      #    open/refresh a GitHub issue with the conflict output, then exit 1.
+      #    The script lives in scripts/apply-patch.sh so the logic is testable.
+      # ----------------------------------------------------------------------
+      - name: Apply auth-proxy patch
+        id: patch
+        if: steps.noop.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # Capture combined stdout+stderr so we can attach it to an issue.
+          set +e
+          OUTPUT="$(bash scripts/apply-patch.sh "${UPSTREAM_DIR}" 2>&1)"
+          STATUS=$?
+          set -e
+          # Echo for the live log regardless of outcome.
+          printf '%s\n' "${OUTPUT}"
+          # Persist the output to a file for the alert step.
+          printf '%s\n' "${OUTPUT}" > patch-apply.log
+          exit "${STATUS}"
+
+      # ----------------------------------------------------------------------
+      # 5b. If the patch failed to apply, open (or refresh) an alert issue.
+      #     Runs only on failure of the patch step. Idempotent: reuses an open
+      #     issue carrying the 'patch-failure' label + the upstream short SHA,
+      #     otherwise comments on / creates one. Then the job fails (step 5
+      #     already exited 1, so the job is red).
+      # ----------------------------------------------------------------------
+      - name: Open issue on patch failure
+        if: failure() && steps.patch.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.upstream.outputs.sha }}
+          SHORT: ${{ steps.upstream.outputs.short }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="Patch fails to apply on upstream ${UPSTREAM_REPO}@main (g${SHORT})"
+          LABEL="patch-failure"
+          # Pull the captured conflict log; fall back to a short note.
+          LOG="$(cat patch-apply.log 2>/dev/null || echo 'No conflict log captured.')"
+          # Build the issue body in a temp file (preserves formatting/backticks).
+          BODY_FILE="$(mktemp)"
+          {
+            echo "The auth-proxy patch no longer applies cleanly to upstream."
+            echo
+            echo "- Upstream: \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\`"
+            echo "- Upstream commit: \`${SHA}\` (g${SHORT})"
+            echo "- Patch: \`${PATCH_FILE}\`"
+            echo "- Failed run: ${RUN_URL}"
+            echo
+            echo "The patch likely needs rebasing onto the changed upstream files"
+            echo "(TLSWebViewClient.kt, WebViewActivity.kt, ConnectionViewModel.kt)."
+            echo
+            echo "<details><summary>Conflict / reject output</summary>"
+            echo
+            echo '```'
+            printf '%s\n' "${LOG}"
+            echo '```'
+            echo
+            echo "</details>"
+          } > "${BODY_FILE}"
+          # Ensure the label exists (ignore error if it already does).
+          gh label create "${LABEL}" --color "B60205" \
+            --description "Auth-proxy patch failed to apply to upstream" \
+            --repo "${GITHUB_REPOSITORY}" 2>/dev/null || true
+          # Find an existing OPEN issue with this exact title to refresh instead
+          # of spamming a new issue every day.
+          EXISTING_NUM="$(gh issue list --repo "${GITHUB_REPOSITORY}" \
+            --state open --label "${LABEL}" --search "${TITLE} in:title" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${TITLE}\")][0].number // empty")"
+          if [ -n "${EXISTING_NUM}" ]; then
+            echo "Refreshing existing issue #${EXISTING_NUM}."
+            gh issue comment "${EXISTING_NUM}" --repo "${GITHUB_REPOSITORY}" \
+              --body-file "${BODY_FILE}"
+          else
+            echo "Opening a new patch-failure issue."
+            gh issue create --repo "${GITHUB_REPOSITORY}" \
+              --title "${TITLE}" --label "${LABEL}" --body-file "${BODY_FILE}"
+          fi
+
+      # ----------------------------------------------------------------------
+      # 6. Read CMake + NDK versions DYNAMICALLY from upstream's
+      #    gradle/libs.versions.toml so we survive upstream version bumps, then
+      #    install both via sdkmanager (licenses auto-accepted). Without the
+      #    pinned CMake the :microwakeword native module fails with
+      #    "[CXX1300] CMake '<ver>' was not found".
+      # ----------------------------------------------------------------------
+      - name: Provision CMake + NDK from upstream libs.versions.toml
+        if: steps.noop.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          TOML="${UPSTREAM_DIR}/gradle/libs.versions.toml"
+          # Parse the quoted value for keys 'cmake' and 'androidNdk'. Matches
+          # lines like:  cmake = "4.1.2"  (tolerant of surrounding whitespace).
+          parse_ver() {
+            grep -E "^[[:space:]]*$1[[:space:]]*=" "${TOML}" \
+              | head -n1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/'
+          }
+          CMAKE_VER="$(parse_ver cmake)"
+          NDK_VER="$(parse_ver androidNdk)"
+          if [ -z "${CMAKE_VER}" ]; then
+            echo "::error::Could not read 'cmake' version from ${TOML}"
+            exit 1
+          fi
+          if [ -z "${NDK_VER}" ]; then
+            echo "::error::Could not read 'androidNdk' version from ${TOML}"
+            exit 1
+          fi
+          echo "Upstream requests CMake ${CMAKE_VER} and NDK ${NDK_VER}."
+          # ANDROID_HOME / ANDROID_SDK_ROOT are preset on ubuntu-latest runners.
+          SDKMANAGER="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/cmdline-tools/latest/bin/sdkmanager"
+          # Accept all licenses (yes | ...) so the install is non-interactive.
+          yes | "${SDKMANAGER}" --licenses >/dev/null 2>&1 || true
+          # Install the exact pinned CMake + NDK. sdkmanager is a no-op if a
+          # package is already present at that version.
+          "${SDKMANAGER}" --install "cmake;${CMAKE_VER}" "ndk;${NDK_VER}"
+
+      # ----------------------------------------------------------------------
+      # 7. Provide a mock google-services.json. The google-services Gradle
+      #    plugin runs even for the FOSS "minimal" flavor and fails the build
+      #    if the file is missing. The upstream tree ships
+      #    .github/mock-google-services.json; copying it to the app module root
+      #    covers every flavor/buildType combo.
+      # ----------------------------------------------------------------------
+      - name: Mock google-services.json
+        if: steps.noop.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          cp "${UPSTREAM_DIR}/.github/mock-google-services.json" \
+            "${UPSTREAM_DIR}/app/google-services.json"
+          echo "Mock google-services.json placed at app/google-services.json"
+
+      # ----------------------------------------------------------------------
+      # 8. JDK 21 (temurin) - required toolchain for the build.
+      # ----------------------------------------------------------------------
+      - name: Set up JDK 21
+        if: steps.noop.outputs.skip != 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # ----------------------------------------------------------------------
+      # 9. Build the FOSS minimal debug APK.
+      #    -Preckon.stage=beta satisfies reckon: GitHub Actions sets CI=true,
+      #    which selects upstream's stages("beta","final") branch; that branch
+      #    REQUIRES a stage or reckon throws. We do NOT unset CI (Gradle treats
+      #    environmentVariable("CI").isPresent as true even when empty). The
+      #    resulting reckon version is irrelevant - we name the release ourselves.
+      # ----------------------------------------------------------------------
+      - name: Build :app:assembleMinimalDebug
+        if: steps.noop.outputs.skip != 'true'
+        working-directory: ${{ env.UPSTREAM_DIR }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew :app:assembleMinimalDebug \
+            -Preckon.stage=beta \
+            --no-daemon --stacktrace
+
+      # ----------------------------------------------------------------------
+      # 10. Derive the human upstream version (YYYY.M.P) from
+      #     changelog_master.xml via the helper script, then compute our tag,
+      #     release title, and APK asset name.
+      #       tag:    v<VER>-authproxy-g<SHORT>
+      #       title:  Home Assistant <VER> + auth-proxy (upstream <SHORT>)
+      #       asset:  ha-android-authproxy-<VER>-g<SHORT>-minimal-debug.apk
+      # ----------------------------------------------------------------------
+      - name: Derive version and names
+        id: version
+        if: steps.noop.outputs.skip != 'true'
+        env:
+          SHORT: ${{ steps.upstream.outputs.short }}
+        run: |
+          set -euo pipefail
+          VER="$(bash scripts/derive-version.sh "${UPSTREAM_DIR}")"
+          if [ -z "${VER}" ]; then
+            echo "::error::Could not derive upstream version from changelog_master.xml"
+            exit 1
+          fi
+          TAG="v${VER}-authproxy-g${SHORT}"
+          TITLE="Home Assistant ${VER} + auth-proxy (upstream ${SHORT})"
+          ASSET="ha-android-authproxy-${VER}-g${SHORT}-minimal-debug.apk"
+          echo "version=${VER}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "title=${TITLE}" >> "${GITHUB_OUTPUT}"
+          echo "asset=${ASSET}" >> "${GITHUB_OUTPUT}"
+          echo "Version=${VER} Tag=${TAG} Asset=${ASSET}"
+
+      # ----------------------------------------------------------------------
+      # 11. Locate the built APK, rename it to the asset name, and compute a
+      #     sha256 checksum (.sha256 sidecar published alongside the APK).
+      # ----------------------------------------------------------------------
+      - name: Locate, rename, and checksum APK
+        id: apk
+        if: steps.noop.outputs.skip != 'true'
+        env:
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          SRC="${UPSTREAM_DIR}/app/build/outputs/apk/minimal/debug/app-minimal-debug.apk"
+          if [ ! -f "${SRC}" ]; then
+            echo "::error::Expected APK not found at ${SRC}"
+            # Help debugging by listing whatever did get produced.
+            find "${UPSTREAM_DIR}/app/build/outputs/apk" -name '*.apk' || true
+            exit 1
+          fi
+          # Stage release artifacts in a clean dir.
+          mkdir -p dist
+          cp "${SRC}" "dist/${ASSET}"
+          # sha256 sidecar; the checksum file references the bare asset name so
+          # `sha256sum -c` works after download in the same directory.
+          ( cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256" )
+          SUM="$(cut -d' ' -f1 "dist/${ASSET}.sha256")"
+          SIZE="$(du -h "dist/${ASSET}" | cut -f1)"
+          echo "apk_path=dist/${ASSET}" >> "${GITHUB_OUTPUT}"
+          echo "sha_path=dist/${ASSET}.sha256" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${SUM}" >> "${GITHUB_OUTPUT}"
+          echo "size=${SIZE}" >> "${GITHUB_OUTPUT}"
+          echo "Built ${ASSET} (${SIZE}), sha256=${SUM}"
+
+      # ----------------------------------------------------------------------
+      # 12. Generate the release notes body (trust story + limitations).
+      # ----------------------------------------------------------------------
+      - name: Generate release notes
+        id: notes
+        if: steps.noop.outputs.skip != 'true'
+        env:
+          VER: ${{ steps.version.outputs.version }}
+          SHA: ${{ steps.upstream.outputs.sha }}
+          SHORT: ${{ steps.upstream.outputs.short }}
+          ASSET: ${{ steps.version.outputs.asset }}
+          SHA256: ${{ steps.apk.outputs.sha256 }}
+          SIZE: ${{ steps.apk.outputs.size }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="release-notes.md"
+          {
+            echo "## Home Assistant ${VER} + auth-proxy support"
+            echo
+            echo "Unofficial FOSS build of the Home Assistant Android companion app"
+            echo "with a small patch that lets you connect **through an OIDC/OAuth2"
+            echo "auth proxy** (Cloudflare Access, Authelia, Authentik, Vouch,"
+            echo "oauth2-proxy) that challenges you before you reach Home Assistant."
+            echo
+            echo "### What this build is"
+            echo
+            echo "- Flavor/type: \`minimal/debug\` (FOSS, no Google Play Services -"
+            echo "  the same flavor F-Droid ships), **debug-signed** with the public"
+            echo "  universal Android debug keystore. No private signing key is used."
+            echo "- Built from upstream [\`${UPSTREAM_REPO}@${SHORT}\`](https://github.com/${UPSTREAM_REPO}/commit/${SHA})"
+            echo "  plus exactly one patch:"
+            echo "  [\`${PATCH_FILE}\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/${PATCH_FILE})"
+            echo "  (3 Kotlin files; ~61 insertions, 2 deletions). Read it before you trust it."
+            echo "- \`applicationId\` carries the \`.minimal.debug\` suffix, so it"
+            echo "  **coexists** with a Play Store install of Home Assistant."
+            echo
+            echo "### Install"
+            echo
+            echo '```'
+            echo "adb install -r ${ASSET}"
+            echo '```'
+            echo
+            echo "(\`-r\` reinstalls and avoids a Play Protect prompt on most devices.)"
+            echo
+            echo "### Verify the download"
+            echo
+            echo "- SHA-256: \`${SHA256}\`"
+            echo "- Size: ${SIZE}"
+            echo
+            echo '```'
+            echo "sha256sum -c ${ASSET}.sha256"
+            echo '```'
+            echo
+            echo "### Known limitation: federated Google / Microsoft sign-in"
+            echo
+            echo "Google and Microsoft **federated** sign-in refuses to render in any"
+            echo "embedded WebView (\`Error 403: disallowed_useragent\`). That is a"
+            echo "published Google/Microsoft policy, not a bug in this patch."
+            echo "**Workaround:** use a non-federated factor on your proxy (email OTP,"
+            echo "TOTP, WebAuthn) or a self-hosted IdP (e.g. Authelia/Authentik with"
+            echo "local accounts)."
+            echo
+            echo "### Trust + attribution"
+            echo
+            echo "This app holds your Home Assistant auth token. It is an **unofficial,"
+            echo "unaffiliated** build - not from Home Assistant or Nabu Casa - provided"
+            echo "**with no warranty**. Upstream is Apache-2.0; see the repo README and"
+            echo "\`LICENSE\` for attribution. You can build it yourself from this repo."
+            echo
+            echo "Context: upstream PR home-assistant/android#6725 (closed - maintainers"
+            echo "prefer OIDC handled in HA core); related hardening: #6733."
+          } > "${NOTES_FILE}"
+          echo "notes_path=${NOTES_FILE}" >> "${GITHUB_OUTPUT}"
+
+      # ----------------------------------------------------------------------
+      # 13. Create the GitHub Release on THIS repo with the APK + checksum,
+      #     tagged at our derived tag and marked as the latest release.
+      #     gh creates the git tag (on --target's commit) when it does not
+      #     already exist. On a force/push rebuild the same-SHA tag may already
+      #     exist, so we delete the prior release + tag first (--cleanup-tag)
+      #     to avoid a "release already exists" failure, then recreate it.
+      # ----------------------------------------------------------------------
+      - name: Create GitHub Release
+        if: steps.noop.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TITLE: ${{ steps.version.outputs.title }}
+          NOTES: ${{ steps.notes.outputs.notes_path }}
+          APK: ${{ steps.apk.outputs.apk_path }}
+          SHAFILE: ${{ steps.apk.outputs.sha_path }}
+        run: |
+          set -euo pipefail
+          # If a release for this tag already exists (force/push rebuild of an
+          # unchanged upstream SHA), delete it and its tag so we can republish
+          # cleanly. '|| true' guards the no-prior-release case.
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Replacing existing release ${TAG}."
+            gh release delete "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --cleanup-tag --yes || true
+          fi
+          # --latest marks this as the repo's latest release; --target pins the
+          # tag to the commit that triggered the run.
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${TITLE}" \
+            --notes-file "${NOTES}" \
+            --latest \
+            --target "${GITHUB_SHA}" \
+            "${APK}" \
+            "${SHAFILE}"
+          echo "Released ${TAG}"
+
+      # ----------------------------------------------------------------------
+      # 14. Friendly summary in the run's job summary panel.
+      # ----------------------------------------------------------------------
+      - name: Write job summary
+        if: always() && steps.noop.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          ASSET: ${{ steps.version.outputs.asset }}
+          SHA256: ${{ steps.apk.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Build summary"
+            echo
+            echo "- Tag: \`${TAG:-n/a}\`"
+            echo "- Asset: \`${ASSET:-n/a}\`"
+            echo "- SHA-256: \`${SHA256:-n/a}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: No-op notice
+        if: steps.noop.outputs.skip == 'true'
+        run: |
+          echo "Upstream unchanged since last release - skipped build (use the" \
+            "workflow_dispatch 'force' input to rebuild anyway)."

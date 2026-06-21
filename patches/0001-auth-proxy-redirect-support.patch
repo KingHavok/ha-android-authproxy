@@ -1,0 +1,185 @@
+From fc7b3c32b89f24318a3549e59945c3219fc722f6 Mon Sep 17 00:00:00 2001
+From: Shane Williams <44717004+KingHavok@users.noreply.github.com>
+Date: Sun, 21 Jun 2026 10:24:44 +1000
+Subject: [PATCH] Support external authentication providers in front of Home
+ Assistant
+
+Keep main-frame authentication-provider navigation inside the WebView so
+that OIDC / OAuth 2.0 reverse proxies (Cloudflare Access, Authelia,
+Authentik, Vouch, oauth2-proxy) can complete their interactive sign-in
+inside the app instead of being ejected to the system browser, which
+breaks the flow because the resulting session cookie never returns to the
+app's WebView.
+
+Two signals keep navigation in-WebView: server-initiated http(s) redirects
+on the main frame (the proxy challenge and its return redirect), and any
+main-frame http(s) navigation while the WebView is currently on a host
+other than the configured Home Assistant origin (so federated-IdP buttons
+on a proxy login page are not ejected mid-flow). User-tapped external links
+from the HA frontend are unaffected and still open in the system browser.
+
+TLSWebViewClient gains a serverHost anchor set by WebViewActivity (on every
+server load) and ConnectionViewModel (onboarding). getWebViewClient() is
+API 26+, so WebViewActivity keeps its own reference to the client.
+
+Known limitation: Google / Microsoft federated sign-in refuses to render in
+any embedded WebView (Error 403: disallowed_useragent) by published
+provider policy; use a non-federated factor (email OTP, TOTP, WebAuthn) or a
+self-hosted IdP.
+
+Based on closed upstream PR home-assistant/android#6725.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../connection/ConnectionViewModel.kt         |  6 ++-
+ .../android/util/TLSWebViewClient.kt          | 45 +++++++++++++++++++
+ .../android/webview/WebViewActivity.kt        | 12 ++++-
+ 3 files changed, 61 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt b/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt
+index 3fc107ae4..4684057b5 100644
+--- a/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt
++++ b/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt
+@@ -143,7 +143,11 @@ internal class ConnectionViewModel @VisibleForTesting constructor(
+             _isLoadingFlow.update { false }
+             updateEffectiveBaseUrl(url)
+         },
+-    )
++    ).apply {
++        // Anchor the WebView client to the onboarding server so auth-provider
++        // navigation on third-party domains stays inside the WebView.
++        serverHost = rawHttpUrl?.host
++    }
+ 
+     /**
+      * [WebChromeClient][android.webkit.WebChromeClient] used by the onboarding WebView.
+diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt b/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt
+index c1f2e1b2b..25dfcfe22 100644
+--- a/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt
++++ b/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt
+@@ -1,5 +1,6 @@
+ package io.homeassistant.companion.android.util
+ 
++import android.annotation.SuppressLint
+ import android.app.Activity
+ import android.content.ActivityNotFoundException
+ import android.content.Context
+@@ -7,6 +8,7 @@ import android.content.ContextWrapper
+ import android.security.KeyChain
+ import android.security.KeyChainAliasCallback
+ import android.webkit.ClientCertRequest
++import android.webkit.WebResourceRequest
+ import android.webkit.WebView
+ import android.webkit.WebViewClient
+ import androidx.annotation.VisibleForTesting
+@@ -19,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.launch
++import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+ import timber.log.Timber
+ 
+ /*
+@@ -37,6 +40,13 @@ open class TLSWebViewClient(private var keyChainRepository: KeyChainRepository)
+     var isCertificateChainValid = false
+         @VisibleForTesting set
+ 
++    /**
++     * Host of the Home Assistant server the WebView is anchored to. Used to distinguish
++     * user-initiated external link taps from in-flight authentication flows on third-party
++     * domains (Cloudflare Access, Authelia, Authentik, etc.).
++     */
++    var serverHost: String? = null
++
+     private var key: PrivateKey? = null
+     private var chain: Array<X509Certificate>? = null
+ 
+@@ -49,6 +59,41 @@ open class TLSWebViewClient(private var keyChainRepository: KeyChainRepository)
+         return null
+     }
+ 
++    /**
++     * Keeps authentication-provider navigation inside the WebView instead of handing it
++     * to the system browser. Two cases are followed in-WebView: server-initiated http(s)
++     * redirects on the main frame (the initial proxy challenge and its return redirect),
++     * and any main-frame http(s) navigation while the WebView is currently sitting on a
++     * host other than [serverHost] (so federated-IdP buttons on a proxy's login page
++     * don't eject the user mid-flow). User-tapped external links from the HA frontend
++     * are unaffected: when on [serverHost], the call falls through to the deprecated
++     * override and the link still opens in the system browser.
++     */
++    @SuppressLint("NewApi")
++    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
++        if (isAuthProviderNavigation(view, request)) {
++            Timber.d("Allowing main-frame navigation to load in WebView (auth flow)")
++            return false
++        }
++        @Suppress("DEPRECATION")
++        return shouldOverrideUrlLoading(view, request?.url?.toString())
++    }
++
++    @SuppressLint("NewApi")
++    @VisibleForTesting
++    internal fun isAuthProviderNavigation(view: WebView?, request: WebResourceRequest?): Boolean {
++        if (request == null) return false
++        if (!request.isForMainFrame) return false
++        val scheme = request.url?.scheme?.lowercase()
++        if (scheme != "http" && scheme != "https") return false
++
++        if (request.isRedirect) return true
++
++        val anchor = serverHost ?: return false
++        val currentHost = view?.url?.toHttpUrlOrNull()?.host ?: return false
++        return !currentHost.equals(anchor, ignoreCase = true)
++    }
++
+     override fun onReceivedClientCertRequest(view: WebView, request: ClientCertRequest) {
+         Timber.d("onReceivedClientCertRequest invoked looking for cert in local storage or ask the user for it")
+         // Let the WebViewActivity know the endpoint requires TLS Client Auth
+diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/webview/WebViewActivity.kt b/app/src/main/kotlin/io/homeassistant/companion/android/webview/WebViewActivity.kt
+index 32acf2abf..b814e7f49 100644
+--- a/app/src/main/kotlin/io/homeassistant/companion/android/webview/WebViewActivity.kt
++++ b/app/src/main/kotlin/io/homeassistant/companion/android/webview/WebViewActivity.kt
+@@ -286,6 +286,11 @@ class WebViewActivity :
+     lateinit var dataSourceFactory: DataSource.Factory
+ 
+     private lateinit var webView: WebView
++
++    // Reference to the WebViewClient instance bound to [webView]. Kept alongside
++    // the WebView itself because WebView.getWebViewClient() is only API 26+,
++    // while the app's minimum SDK is 23.
++    private var webViewTlsClient: TLSWebViewClient? = null
+     private var loadedUrl: Uri? = null
+     private lateinit var decor: FrameLayout
+     private var customViewFromWebView = mutableStateOf<View?>(null)
+@@ -511,7 +516,7 @@ class WebViewActivity :
+                 }
+             }
+ 
+-            webViewClient = object : TLSWebViewClient(keyChainRepository) {
++            val tlsClient = object : TLSWebViewClient(keyChainRepository) {
+                 @Deprecated("Deprecated in Java for SDK >= 23")
+                 override fun onReceivedError(
+                     view: WebView?,
+@@ -674,6 +679,8 @@ class WebViewActivity :
+                     presenter.stopScanningForImprov(false)
+                 }
+             }
++            webViewClient = tlsClient
++            this@WebViewActivity.webViewTlsClient = tlsClient
+ 
+             setDownloadListener { url, _, contentDisposition, mimetype, _ ->
+                 if (SdkVersion.isAtLeast(Build.VERSION_CODES.Q) ||
+@@ -1640,6 +1647,9 @@ class WebViewActivity :
+             if (shouldLoadUrl) {
+                 clearHistory = !keepHistory
+                 loadedUrl = url
++                // Anchor the WebView client to the server host so auth-provider
++                // navigation on third-party domains stays inside the WebView.
++                webViewTlsClient?.serverHost = url.host
+ 
+                 loadUrlJob?.cancel()
+                 loadUrlJob = lifecycleScope.launch {
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,39 @@
+ha-android-authproxy
+=====================
+
+This repository distributes builds of the Home Assistant Companion for Android
+with a single, small modification (the "auth-proxy patch") applied on top of the
+upstream source.
+
+It is an INDEPENDENT, UNOFFICIAL project. It is not produced, endorsed, or
+supported by Home Assistant, Nabu Casa, the Open Home Foundation, or any other
+named vendor. All trademarks belong to their respective owners.
+
+--------------------------------------------------------------------------------
+Upstream work
+--------------------------------------------------------------------------------
+
+Home Assistant Companion for Android
+Copyright the Home Assistant Authors and contributors.
+Source: https://github.com/home-assistant/android
+Licensed under the Apache License, Version 2.0.
+
+Each published release in this repository is built from a specific upstream
+commit (named in the release title and notes as "upstream <short-sha>") with the
+patch in patches/0001-auth-proxy-redirect-support.patch applied. The upstream
+code is otherwise unchanged. The upstream license (Apache-2.0) and any upstream
+attribution apply to that code unchanged.
+
+--------------------------------------------------------------------------------
+Modifications in this repository
+--------------------------------------------------------------------------------
+
+The files added by this repository (the patch, the helper scripts under
+scripts/, the GitHub Actions workflow under .github/workflows/, and the README)
+are Copyright the ha-android-authproxy contributors and are likewise licensed
+under the Apache License, Version 2.0 (see the LICENSE file).
+
+The patch keeps main-frame authentication-provider navigation inside the app's
+WebView so that OIDC / OAuth 2.0 reverse proxies placed in front of Home
+Assistant can complete their interactive sign-in. See the README for details,
+scope, and known limitations.

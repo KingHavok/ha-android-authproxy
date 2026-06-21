@@ -1,0 +1,13 @@
+# Workspace artifacts produced by the build-and-release workflow.
+# These must never be committed (a push to main re-triggers the build).
+upstream/
+dist/
+release-notes.md
+patch-apply.log
+
+# Build output / local experiments
+*.apk
+*.apk.sha256
+
+# macOS
+.DS_Store
