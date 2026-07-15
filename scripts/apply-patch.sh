@@ -91,29 +91,29 @@ fail_with_conflict_detail() {
   local stage="$1"
   {
     printf '\n'
-    printf '================================================================\n'
+    printf '%s\n' '================================================================'
     printf 'PATCH FAILED TO APPLY (%s)\n' "${stage}"
-    printf '================================================================\n'
+    printf '%s\n' '================================================================'
     printf 'Patch : %s\n' "${PATCH_FILE}"
     printf 'Tree  : %s\n' "$(pwd -P)"
     printf 'HEAD  : %s\n' "$(git rev-parse HEAD 2>/dev/null || echo '<unknown>')"
-    printf '----------------------------------------------------------------\n'
+    printf '%s\n' '----------------------------------------------------------------'
 
     # Per-hunk diagnosis: which hunks/files cannot be located in the tree.
     printf 'Hunk-level diagnosis (git apply --3way --check):\n'
     git apply --3way --check --verbose "${PATCH_FILE}" 2>&1 || true
-    printf '----------------------------------------------------------------\n'
+    printf '%s\n' '----------------------------------------------------------------'
 
     # Any conflict markers / unmerged paths left in the work tree.
     local unmerged
     unmerged="$(git diff --name-only --diff-filter=U 2>/dev/null || true)"
     if [ -n "${unmerged}" ]; then
       printf 'Files with unresolved merge conflicts:\n%s\n' "${unmerged}"
-      printf '----------------------------------------------------------------\n'
+      printf '%s\n' '----------------------------------------------------------------'
       printf 'Conflict markers:\n'
       # shellcheck disable=SC2086
       grep -nE '^(<<<<<<<|=======|>>>>>>>)' ${unmerged} 2>/dev/null || true
-      printf '----------------------------------------------------------------\n'
+      printf '%s\n' '----------------------------------------------------------------'
     fi
 
     # *.rej reject files, if `git apply` left any behind.
@@ -121,9 +121,9 @@ fail_with_conflict_detail() {
     rejects="$(git ls-files --others --exclude-standard 2>/dev/null | grep -E '\.rej$' || true)"
     if [ -n "${rejects}" ]; then
       printf 'Reject files:\n%s\n' "${rejects}"
-      printf '----------------------------------------------------------------\n'
+      printf '%s\n' '----------------------------------------------------------------'
     fi
-    printf '================================================================\n'
+    printf '%s\n' '================================================================'
   } >&2
   die "patch did not apply cleanly — see conflict detail above. The upstream files likely changed; the patch must be refreshed." 2
 }
