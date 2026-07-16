@@ -93,12 +93,12 @@ The entire change is one git `format-patch` file:
 
 **[`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch)**
 
-It touches **exactly three Kotlin files** (roughly **61 insertions, 2 deletions**) and adds no new dependencies, permissions, or network endpoints:
+It touches **exactly three Kotlin files** (roughly **55 insertions, 1 deletion**) and adds no new dependencies, permissions, or network endpoints:
 
 | File | Change |
 | --- | --- |
-| `app/.../util/TLSWebViewClient.kt` | Overrides `shouldOverrideUrlLoading(WebResourceRequest)` so that **main-frame auth-provider navigation** — server redirects, and clicks made while you are still off the anchored Home Assistant host — is kept **inside** the WebView instead of being handed to the system browser. |
-| `app/.../webview/WebViewActivity.kt` | Keeps its own reference to the `TLSWebViewClient` in a dedicated field (`webViewTlsClient`), set when the client is attached to the WebView — rather than calling `WebView.getWebViewClient()`, which is API 26+ while the app's `minSdk` is 23 — and sets `serverHost = url.host` on each load, so the client always knows which host is the "real" Home Assistant origin. |
+| `app/.../util/TLSWebViewClient.kt` | Adds a `serverHost` anchor and overrides `shouldOverrideUrlLoading(WebResourceRequest)` so that **main-frame auth-provider navigation** — server-initiated redirects, and navigation made while you are still off the anchored Home Assistant host — is kept **inside** the WebView instead of being handed to the system browser. This is the shared base class both frontend web clients extend, so the logic survives upstream's frontend refactors. |
+| `app/.../frontend/FrontendViewModel.kt` | Sets the client's `serverHost` to the Home Assistant server host when it selects the server URL to load (in `handleUrlResult`), so the client always knows which host is the "real" origin. This is where the anchor lives after upstream removed `WebViewActivity` in favour of `FrontendScreen` / `FrontendViewModel`. |
 | `app/.../onboarding/connection/ConnectionViewModel.kt` | Sets `serverHost` on the **onboarding** web client too, so the same logic applies during first-time setup. |
 
 The patch is a `git format-patch` file, so it preserves the original author, commit message, and diff. **Read it before you trust it** — it is short by design, and that is the point. See [Trust and security](#trust-and-security).
@@ -120,7 +120,7 @@ This app holds your **Home Assistant long-lived auth token**. Installing a third
     - It **does** protect updates. Android only installs an update over an existing install if both are signed with the **same** key. Because only the maintainer holds this private key, a modified APK from anywhere else **cannot** masquerade as an in-place update to an installed copy. (An earlier version of this project signed with a *committed, public* debug key — which let anyone forge a matching-signature "update." It was replaced precisely to close that gap.)
     - Because every release shares this one key, genuine updates install **in place** (no uninstall between versions) and you only clear Google Play Protect **once**. (See [Installing](#installing).)
 - **It holds your HA auth token.** The token-bearing JavaScript bridge is the most sensitive surface in the app. This patch is deliberately narrow and is designed to keep that bridge anchored to your real Home Assistant origin, consistent with the hardening direction of [#6733](https://github.com/home-assistant/android/pull/6733). It does not add new token handling.
-- **Read the patch.** The complete change is **one short file**: [`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch). Three files, ~61 lines. You can read it in a few minutes. Every other source file in a release is **unchanged upstream Home Assistant** — the patch is the only modification to the source. (The compiled APK isn't byte-identical to a stock build — see [why your APK won't match our SHA-256](#why-your-apk-wont-match-our-sha-256-and-thats-fine) — but the *source diff* is exactly this patch and nothing else.)
+- **Read the patch.** The complete change is **one short file**: [`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch). Three files, ~55 lines. You can read it in a few minutes. Every other source file in a release is **unchanged upstream Home Assistant** — the patch is the only modification to the source. (The compiled APK isn't byte-identical to a stock build — see [why your APK won't match our SHA-256](#why-your-apk-wont-match-our-sha-256-and-thats-fine) — but the *source diff* is exactly this patch and nothing else.)
 - **Build it yourself.** You don't have to trust the published APK at all. The [build instructions](#building-it-yourself) let you reproduce a release from the exact upstream commit it names. The workflow that produces releases is in this repo in full — there is nothing hidden.
 - **Unaffiliated.** This project is **not affiliated with, endorsed by, or supported by Home Assistant, Nabu Casa, the Open Home Foundation, or any of the proxy/IdP vendors named above.**
 - **No warranty.** This is provided **as-is, with no warranty of any kind**. You run it at your own risk. If something breaks, you keep both pieces.
@@ -347,11 +347,13 @@ git am --3way /path/to/patches/0001-auth-proxy-redirect-support.patch
 git format-patch -1 --stdout > /path/to/patches/0001-auth-proxy-redirect-support.patch
 ```
 
-Keep the change **minimal** and confined to the same three files where possible:
+Keep the change **minimal**. The auth-navigation logic lives in the shared base client `util/TLSWebViewClient.kt` (stable), and the `serverHost` anchor is set from whichever ViewModel drives the frontend WebView. Those wiring points move as upstream refactors — currently:
 
-- `util/TLSWebViewClient.kt`
-- `webview/WebViewActivity.kt`
-- `onboarding/connection/ConnectionViewModel.kt`
+- `util/TLSWebViewClient.kt` — the `serverHost` anchor + `shouldOverrideUrlLoading` override (this rarely needs to change)
+- `frontend/FrontendViewModel.kt` — sets `serverHost` on the main frontend client
+- `onboarding/connection/ConnectionViewModel.kt` — sets `serverHost` on the onboarding client
+
+(Upstream reshapes the frontend/WebView layer periodically — e.g. it replaced `WebViewActivity` with `FrontendScreen`/`FrontendViewModel` in mid-2026 — so expect the *anchor-setting* files to shift over time even though the core logic in `TLSWebViewClient` stays put. If the anchor site has moved, find where the `HAWebViewClient` is created via `HAWebViewClientFactory.create(...)` and set `serverHost` there.)
 
 Commit the regenerated patch to this repo's `main`; the `push` trigger rebuilds and, if green, publishes a fresh release. Helper scripts you'll find useful:
 
