@@ -1,6 +1,6 @@
-From 717f43dec3ba5e209f5db47162c039dd6ee6c36b Mon Sep 17 00:00:00 2001
+From 291f1958566cd443e3782c706685ac04f765fba5 Mon Sep 17 00:00:00 2001
 From: Shane Williams <44717004+KingHavok@users.noreply.github.com>
-Date: Wed, 15 Jul 2026 14:08:30 +1000
+Date: Wed, 5 Aug 2026 22:25:50 +1000
 Subject: [PATCH] Support external authentication providers in front of Home
  Assistant
 
@@ -10,19 +10,21 @@ oauth2-proxy) can complete their interactive sign-in inside the app instead of
 being ejected to the system browser, where the resulting session cookie never
 returns to the app's WebView.
 
-TLSWebViewClient gains a `serverHost` anchor and an override of
-shouldOverrideUrlLoading(WebResourceRequest) that keeps two kinds of navigation
-in-WebView: server-initiated http(s) redirects on the main frame (the proxy
-challenge and its return redirect), and any main-frame http(s) navigation while
-the WebView is currently on a host other than the anchored Home Assistant origin
-(so federated-IdP buttons on a proxy login page are not ejected mid-flow).
-Everything else falls through to the existing URL-interception path, so
-user-tapped external links from the HA frontend still open in the system browser.
+HAWebViewClient overrides shouldOverrideUrlLoading(WebResourceRequest) and keeps
+two kinds of navigation in-WebView: server-initiated http(s) redirects on the
+main frame (the proxy challenge and its return redirect), and any main-frame
+http(s) navigation made while the WebView is currently on a host other than the
+Home Assistant origin (so federated-IdP buttons on a proxy login page are not
+ejected mid-flow). Everything else falls through to the existing onUrlIntercepted
+path, so user-tapped external links from the HA frontend still open in the system
+browser.
 
-The anchor is set by FrontendViewModel (when it selects the server URL to load)
-and by the onboarding ConnectionViewModel. This replaces an earlier version that
-attached the same behaviour to WebViewActivity, which upstream has since removed
-in favour of FrontendScreen / FrontendViewModel.
+The Home Assistant origin is derived from the currentUrlFlow the client is
+already constructed with, so no ViewModel wiring is required. Earlier versions of
+this change pushed the anchor in from WebViewActivity and then from
+FrontendViewModel/ConnectionViewModel; both broke when upstream refactored those
+call sites (FrontendScreen migration, then async mTLS + SuspendLazy clients).
+Deriving it from currentUrlFlow keeps the whole change in one file.
 
 Known limitation: Google / Microsoft federated sign-in refuses to render in any
 embedded WebView (Error 403: disallowed_useragent) by published provider policy;
@@ -32,104 +34,36 @@ Based on closed upstream PR home-assistant/android#6725.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ---
- .../android/frontend/FrontendViewModel.kt     |  5 +++
- .../connection/ConnectionViewModel.kt         |  6 ++-
- .../android/util/TLSWebViewClient.kt          | 45 +++++++++++++++++++
- 3 files changed, 55 insertions(+), 1 deletion(-)
+ .../companion/android/util/HAWebViewClient.kt | 46 +++++++++++++++++++
+ 1 file changed, 46 insertions(+)
 
-diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/frontend/FrontendViewModel.kt b/app/src/main/kotlin/io/homeassistant/companion/android/frontend/FrontendViewModel.kt
-index e645f7dbc..3d32efbb5 100644
---- a/app/src/main/kotlin/io/homeassistant/companion/android/frontend/FrontendViewModel.kt
-+++ b/app/src/main/kotlin/io/homeassistant/companion/android/frontend/FrontendViewModel.kt
-@@ -80,6 +80,7 @@ import kotlinx.coroutines.flow.merge
- import kotlinx.coroutines.flow.stateIn
- import kotlinx.coroutines.flow.update
- import kotlinx.coroutines.launch
-+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
- import timber.log.Timber
- 
- /** Maximum time to wait for the frontend to load before showing a timeout error. */
-@@ -915,6 +916,10 @@ internal class FrontendViewModel @VisibleForTesting constructor(
-         when (result) {
-             is UrlLoadResult.Success -> {
-                 pendingMoreInfoEntityId = result.moreInfoEntityId
-+                // Anchor the WebView client to the Home Assistant server host so auth-provider
-+                // navigation on third-party domains (Cloudflare Access, Authelia, ...) is kept
-+                // inside the WebView instead of being handed to the system browser.
-+                webViewClient.serverHost = result.url.toHttpUrlOrNull()?.host
-                 _viewState.update {
-                     FrontendViewState.Loading(
-                         serverId = result.serverId,
-diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt b/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt
-index 4821fd748..12f3a80d8 100644
---- a/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt
-+++ b/app/src/main/kotlin/io/homeassistant/companion/android/onboarding/connection/ConnectionViewModel.kt
-@@ -143,7 +143,11 @@ internal class ConnectionViewModel @VisibleForTesting constructor(
-             _isLoadingFlow.update { false }
-             updateEffectiveBaseUrl(url)
-         },
--    )
-+    ).apply {
-+        // Anchor to the onboarding server host so auth-provider navigation on third-party
-+        // domains stays inside the WebView instead of being ejected to the system browser.
-+        serverHost = rawHttpUrl?.host
-+    }
- 
-     /**
-      * [WebChromeClient][android.webkit.WebChromeClient] used by the onboarding WebView.
-diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt b/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt
-index 97e3b5d69..ce84afc3f 100644
---- a/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt
-+++ b/app/src/main/kotlin/io/homeassistant/companion/android/util/TLSWebViewClient.kt
-@@ -1,5 +1,6 @@
- package io.homeassistant.companion.android.util
- 
-+import android.annotation.SuppressLint
- import android.app.Activity
- import android.content.ActivityNotFoundException
- import android.content.Context
-@@ -7,6 +8,7 @@ import android.content.ContextWrapper
- import android.security.KeyChain
- import android.security.KeyChainAliasCallback
- import android.webkit.ClientCertRequest
-+import android.webkit.WebResourceRequest
- import android.webkit.WebView
- import android.webkit.WebViewClient
- import androidx.annotation.VisibleForTesting
-@@ -19,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
- import kotlinx.coroutines.Dispatchers
- import kotlinx.coroutines.Job
- import kotlinx.coroutines.launch
-+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
- import timber.log.Timber
- 
- /*
-@@ -37,9 +40,51 @@ open class TLSWebViewClient(private var keyChainRepository: KeyChainRepository)
-     var isCertificateChainValid = false
-         @VisibleForTesting set
+diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt b/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt
+index 25e4aca7b..8c2d70169 100644
+--- a/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt
++++ b/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt
+@@ -269,6 +269,52 @@ class HAWebViewClient internal constructor(
+         return true
+     }
  
 +    /**
-+     * Host of the Home Assistant server the WebView is anchored to (e.g. `ha.example.com`).
-+     * Set by the frontend/onboarding ViewModels when they choose the server URL to load.
++     * Keeps authentication-provider navigation inside the WebView instead of handing it to the host
++     * (which would open it in the system browser).
 +     *
-+     * Used to distinguish user-initiated external link taps from in-flight authentication
-+     * flows on third-party domains (Cloudflare Access, Authelia, Authentik, etc.). When null,
-+     * only server-initiated redirects are kept in the WebView.
++     * When an OIDC / OAuth 2.0 reverse proxy (Cloudflare Access, Authelia, Authentik, Vouch,
++     * oauth2-proxy, ...) sits in front of Home Assistant, it challenges the user on its own domain
++     * before the Home Assistant frontend is ever reached. Treating that as an "external link" breaks
++     * the flow: the sign-in completes in the browser and its session cookie never returns to this
++     * WebView. Two kinds of navigation are therefore followed in-WebView:
++     *
++     *  1. Server-initiated http(s) redirects on the main frame — the proxy's auth challenge and its
++     *     return redirect back to Home Assistant.
++     *  2. Any main-frame http(s) navigation made while the WebView is currently on a host other than
++     *     the Home Assistant origin — so a federated-IdP button on the proxy's own login page does
++     *     not eject the user mid-flow.
++     *
++     * Everything else falls through to [onUrlIntercepted], so user-tapped external links on the
++     * Home Assistant frontend still open in the system browser exactly as before.
 +     */
-+    var serverHost: String? = null
-+
-     private var key: PrivateKey? = null
-     private var chain: Array<X509Certificate>? = null
- 
-+    /**
-+     * Keeps authentication-provider navigation inside the WebView instead of handing it to the
-+     * system browser. Two cases are followed in-WebView: server-initiated http(s) redirects on the
-+     * main frame (the proxy challenge and its return redirect), and any main-frame http(s)
-+     * navigation while the WebView is currently on a host other than [serverHost] (so federated-IdP
-+     * buttons on a proxy login page don't eject the user mid-flow). Everything else falls through to
-+     * the deprecated overload, preserving the existing external-link handling.
-+     */
-+    @SuppressLint("NewApi")
 +    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
 +        if (isAuthProviderNavigation(view, request)) {
 +            Timber.d("Allowing main-frame navigation to load in WebView (auth flow)")
@@ -139,7 +73,11 @@ index 97e3b5d69..ce84afc3f 100644
 +        return shouldOverrideUrlLoading(view, request?.url?.toString())
 +    }
 +
-+    @SuppressLint("NewApi")
++    /**
++     * The Home Assistant origin the WebView is anchored to, derived from [currentUrlFlow] (the URL
++     * the app asked the WebView to load). Navigation away from this host is what marks an in-flight
++     * authentication flow.
++     */
 +    private fun isAuthProviderNavigation(view: WebView?, request: WebResourceRequest?): Boolean {
 +        if (request == null) return false
 +        if (!request.isForMainFrame) return false
@@ -148,14 +86,14 @@ index 97e3b5d69..ce84afc3f 100644
 +
 +        if (request.isRedirect) return true
 +
-+        val anchor = serverHost ?: return false
-+        val currentHost = view?.url?.toHttpUrlOrNull()?.host ?: return false
-+        return !currentHost.equals(anchor, ignoreCase = true)
++        val anchorHost = currentUrlFlow.value?.toUri()?.host ?: return false
++        val currentHost = view?.url?.toUri()?.host ?: return false
++        return !currentHost.equals(anchorHost, ignoreCase = true)
 +    }
 +
-     private fun getActivity(context: Context?): Activity? {
-         if (context == null) {
-             return null
+     // Override deprecated method for backward compatibility with API 23 and below.
+     // The non-deprecated shouldOverrideUrlLoading(WebView, WebResourceRequest) is not invoked
+     // on these older Android versions, so this method remains necessary.
 -- 
 2.50.1 (Apple Git-155)
 
