@@ -3,26 +3,34 @@
 # derive-version.sh — echo the upstream human version string (YYYY.M.P).
 #
 # Part of: KingHavok/ha-android-authproxy
-# Purpose : Parse the FIRST "- Main" release from upstream's
-#           app/src/main/res/xml/changelog_master.xml and print its version,
-#           e.g. "2026.6.5". Used by the workflow to name the tag/release.
+# Purpose : Report which upstream Home Assistant release a build is based on, so
+#           the release tag/title/asset can be named after it. Used by the
+#           build-and-release workflow.
 #
 # Usage   : scripts/derive-version.sh [UPSTREAM_TREE]
 #             UPSTREAM_TREE  Path to the checked-out upstream git repo.
 #                            Defaults to the current directory (".").
 #
-# Output  : the bare version string on stdout (no leading "v", no " - Main"),
-#           e.g.  2026.6.5
+# Output  : the bare version string on stdout (no leading "v"), e.g.  2026.8.3
+#           Diagnostics go to stderr, so `$(derive-version.sh)` is clean.
 #
 # Exit    : 0  version printed
-#           1  usage / file error, or no parseable "- Main" release found
+#           1  usage/tree error, or no version could be determined
 #
-# Notes   : - No deps beyond grep/sed/awk (and coreutils). No network.
-#           - The changelog lists several "<release ...>" lines per version
-#             (Main / Wear / Automotive). We deliberately match only the "Main"
-#             variant and take the FIRST one, which is the newest release.
-#           - Expected line shape:
-#               <release version="2026.6.5 - Main" versioncode="3">
+# Strategy:
+#   1. PRIMARY — the nearest release-style git tag (YYYY.M.P) that is an
+#      ancestor of the checked-out commit. Upstream tags every release this way,
+#      so this answers "which release is this commit built on top of". It needs
+#      the clone to include tags; the workflow does a full clone (also required
+#      by the reckon Gradle plugin), so they are present.
+#   2. FALLBACK — the legacy app/src/main/res/xml/changelog_master.xml, for
+#      older commits. Upstream DELETED that file when it moved the changelog to
+#      Kotlin ("Modernize changelog UI", home-assistant/android#7279), which is
+#      why the tag lookup is now primary.
+#
+#   Note the two sources differ by one release: the XML was pre-bumped to the
+#   UPCOMING version, while a tag marks the LAST SHIPPED release. The tag is the
+#   more truthful claim for a build made from main after that release.
 #
 set -euo pipefail
 
@@ -30,32 +38,44 @@ log() { printf '[derive-version] %s\n' "$*" >&2; }
 die() { printf '[derive-version] ERROR: %s\n' "$*" >&2; exit "${2:-1}"; }
 
 UPSTREAM_TREE="${1:-.}"
-CHANGELOG_REL="app/src/main/res/xml/changelog_master.xml"
-CHANGELOG="${UPSTREAM_TREE%/}/${CHANGELOG_REL}"
+# Release tags look like 2026.8.3 (also tolerates a 4th component).
+TAG_GLOB='[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*'
 
-# --- preflight --------------------------------------------------------------
 [ -d "${UPSTREAM_TREE}" ] || die "upstream tree '${UPSTREAM_TREE}' is not a directory." 1
-[ -f "${CHANGELOG}" ]     || die "changelog not found: '${CHANGELOG}'." 1
-[ -s "${CHANGELOG}" ]     || die "changelog is empty: '${CHANGELOG}'." 1
 
-# --- parse the first '<release version="YYYY.M.P - Main" ...>' ---------------
-# 1. grep   : keep only release lines whose version ends in '- Main'.
-# 2. head   : take the first (newest) such line.
-# 3. sed    : extract the version digits that sit before ' - Main' inside the
-#             version="..." attribute. Captures YYYY.M.P (1+ dot-separated nums).
-VERSION="$(
-  grep -E '<release[[:space:]][^>]*version="[0-9]+(\.[0-9]+)*[[:space:]]*-[[:space:]]*Main"' "${CHANGELOG}" \
-    | head -n 1 \
-    | sed -E 's/.*version="([0-9]+(\.[0-9]+)*)[[:space:]]*-[[:space:]]*Main".*/\1/' \
-)" || true
+VERSION=""
+
+# --- 1. primary: nearest release tag reachable from HEAD ---------------------
+if git -C "${UPSTREAM_TREE}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  VERSION="$(
+    git -C "${UPSTREAM_TREE}" describe --tags --abbrev=0 --match "${TAG_GLOB}" HEAD 2>/dev/null || true
+  )"
+  if [ -n "${VERSION}" ]; then
+    log "upstream version: ${VERSION} (nearest release tag reachable from HEAD)"
+  else
+    log "no release-style tag reachable from HEAD; falling back to the legacy changelog"
+  fi
+else
+  log "'${UPSTREAM_TREE}' is not a git work tree; falling back to the legacy changelog"
+fi
+
+# --- 2. fallback: legacy changelog_master.xml (pre-#7279 commits) ------------
+if [ -z "${VERSION}" ]; then
+  CHANGELOG="${UPSTREAM_TREE%/}/app/src/main/res/xml/changelog_master.xml"
+  if [ -s "${CHANGELOG}" ]; then
+    VERSION="$(
+      grep -E '<release[[:space:]][^>]*version="[0-9]+(\.[0-9]+)*[[:space:]]*-[[:space:]]*Main"' "${CHANGELOG}" \
+        | head -n 1 \
+        | sed -E 's/.*version="([0-9]+(\.[0-9]+)*)[[:space:]]*-[[:space:]]*Main".*/\1/' \
+    )" || true
+    [ -n "${VERSION}" ] && log "upstream version: ${VERSION} (from legacy ${CHANGELOG})"
+  fi
+fi
 
 # --- validate ---------------------------------------------------------------
-[ -n "${VERSION}" ] \
-  || die "no '<release version=\"YYYY.M.P - Main\" ...>' entry found in '${CHANGELOG}'." 1
+[ -n "${VERSION}" ] || die "could not determine the upstream version: no release-style git tag (${TAG_GLOB}) reachable from HEAD, and no legacy changelog_master.xml to fall back on. If the clone is shallow or tag-less, fetch tags." 1
 
-# Guard against a malformed capture (e.g. sed returned the whole line unchanged).
 printf '%s' "${VERSION}" | grep -Eq '^[0-9]+(\.[0-9]+)*$' \
-  || die "parsed version '${VERSION}' is not in the expected YYYY.M.P form." 1
+  || die "derived version '${VERSION}' is not in the expected YYYY.M.P form." 1
 
-log "upstream version: ${VERSION} (from ${CHANGELOG})"
 printf '%s\n' "${VERSION}"

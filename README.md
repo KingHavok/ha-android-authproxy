@@ -183,7 +183,7 @@ You **do not** have to uninstall the official app. The **minimal / debug** build
 
 Release names are derived so that you can always see **which upstream version** and **which upstream commit** a build came from.
 
-- **`<VERSION>`** — the upstream human version, parsed from the first `<release version="YYYY.M.P - Main" …>` entry in upstream `app/src/main/res/xml/changelog_master.xml` (e.g. `2026.6.5`).
+- **`<VERSION>`** — the upstream Home Assistant release the build sits on top of: the nearest release-style git tag (`YYYY.M.P`) reachable from the upstream commit that was built (e.g. `2026.8.3`). Upstream tags every release, so this reflects the last **shipped** release at that commit.
 - **`<SHORT>`** — the first 7 characters of the upstream `main` commit SHA that was built.
 
 These combine into:
@@ -358,7 +358,7 @@ Keep the change **minimal** and confined to `util/HAWebViewClient.kt`. The whole
 Commit the regenerated patch to this repo's `main`; the `push` trigger rebuilds and, if green, publishes a fresh release. Helper scripts you'll find useful:
 
 - **`scripts/apply-patch.sh`** — applies the patch to a checked-out upstream tree with a 3-way merge; exits non-zero with the conflict detail on failure.
-- **`scripts/derive-version.sh`** — echoes the upstream `YYYY.M.P` version from `changelog_master.xml`.
+- **`scripts/derive-version.sh`** — echoes the upstream `YYYY.M.P` version, from the nearest release tag reachable from the upstream commit (falling back to the legacy `changelog_master.xml` for older commits, before upstream moved the changelog into Kotlin).
 
 ---
 
