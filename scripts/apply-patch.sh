@@ -99,9 +99,15 @@ fail_with_conflict_detail() {
     printf 'HEAD  : %s\n' "$(git rev-parse HEAD 2>/dev/null || echo '<unknown>')"
     printf '%s\n' '----------------------------------------------------------------'
 
-    # Per-hunk diagnosis: which hunks/files cannot be located in the tree.
-    printf 'Hunk-level diagnosis (git apply --3way --check):\n'
-    git apply --3way --check --verbose "${PATCH_FILE}" 2>&1 || true
+    # Per-hunk diagnosis: which hunks/files cannot be located in the tree. Check
+    # against a temporary index of HEAD, because the real index is now unmerged
+    # and git would misreport the conflicted file as "does not exist in index".
+    printf 'Hunk-level diagnosis (git apply --cached --check, against HEAD):\n'
+    local diag_index
+    diag_index="$(mktemp -u)"
+    GIT_INDEX_FILE="${diag_index}" git read-tree HEAD 2>&1 || true
+    GIT_INDEX_FILE="${diag_index}" git apply --cached --check --verbose "${PATCH_FILE}" 2>&1 || true
+    rm -f "${diag_index}"
     printf '%s\n' '----------------------------------------------------------------'
 
     # Any conflict markers / unmerged paths left in the work tree.

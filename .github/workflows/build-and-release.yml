@@ -4,8 +4,9 @@ name: build-and-release
 #   This repo (KingHavok/ha-android-authproxy) ships ONLY a patch + scripts.
 #   On each run we clone upstream home-assistant/android@main, apply our
 #   auth-proxy patch, build the FOSS "minimal/debug" APK, and publish a
-#   GitHub Release. Debug build type = auto-signed with the universal Android
-#   debug keystore, so NO signing secret is required.
+#   GitHub Release. It is a debug build type, but signed with the project's
+#   private release key (repo secrets, applied through an init script), so
+#   releases update in place and can't be forged with a public debug key.
 
 # Triggers:
 #   * schedule  - daily at 06:17 UTC. A deliberately "off-grid" minute (not :00)
@@ -231,8 +232,8 @@ jobs:
             echo "- Patch: \`${PATCH_FILE}\`"
             echo "- Failed run: ${RUN_URL}"
             echo
-            echo "The patch likely needs rebasing onto the changed upstream files"
-            echo "(TLSWebViewClient.kt, WebViewActivity.kt, ConnectionViewModel.kt)."
+            echo "The patch likely needs rebasing onto the changed upstream code. See"
+            echo "\"For contributors\" in the README, and always compile the result."
             echo
             echo "<details><summary>Conflict / reject output</summary>"
             echo
@@ -421,8 +422,8 @@ jobs:
           echo "Verified: APK is signed with the project release key"
 
       # ----------------------------------------------------------------------
-      # 10. Derive the human upstream version (YYYY.M.P) from
-      #     changelog_master.xml via the helper script, then compute our tag,
+      # 10. Derive the human upstream version (YYYY.M.P) from upstream's
+      #     release tags via the helper script, then compute our tag,
       #     release title, and APK asset name.
       #       tag:    v<VER>-authproxy-g<SHORT>
       #       title:  Home Assistant <VER> + auth-proxy (upstream <SHORT>)
@@ -437,7 +438,7 @@ jobs:
           set -euo pipefail
           VER="$(bash scripts/derive-version.sh "${UPSTREAM_DIR}")"
           if [ -z "${VER}" ]; then
-            echo "::error::Could not derive upstream version from changelog_master.xml"
+            echo "::error::Could not derive the upstream version (see derive-version.sh)"
             exit 1
           fi
           TAG="v${VER}-authproxy-g${SHORT}"
@@ -497,6 +498,8 @@ jobs:
         run: |
           set -euo pipefail
           NOTES_FILE="release-notes.md"
+          # Read the size from the patch itself so these notes cannot go stale.
+          PATCH_STATS="$(git apply --numstat "${PATCH_FILE}" | awk '{i+=$1; d+=$2; n++} END {printf "%d file%s; ~%d insertions, %d deletions", n, (n==1?"":"s"), i, d}')"
           {
             echo "## Home Assistant ${VER} + auth-proxy support"
             echo
@@ -514,7 +517,7 @@ jobs:
             echo "- Built from upstream [\`${UPSTREAM_REPO}@${SHORT}\`](https://github.com/${UPSTREAM_REPO}/commit/${SHA})"
             echo "  plus exactly one patch:"
             echo "  [\`${PATCH_FILE}\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/${PATCH_FILE})"
-            echo "  (3 Kotlin files; ~61 insertions, 2 deletions). Read it before you trust it."
+            echo "  (${PATCH_STATS}). Read it before you trust it."
             echo "- \`applicationId\` carries the \`.minimal.debug\` suffix, so it"
             echo "  **coexists** with a Play Store install of Home Assistant."
             echo

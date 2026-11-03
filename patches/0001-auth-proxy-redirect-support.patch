@@ -1,6 +1,6 @@
-From 291f1958566cd443e3782c706685ac04f765fba5 Mon Sep 17 00:00:00 2001
+From 9cb58247b93a1cdd5e2ca5ea9e3bdf43cd3a72e0 Mon Sep 17 00:00:00 2001
 From: Shane Williams <44717004+KingHavok@users.noreply.github.com>
-Date: Wed, 5 Aug 2026 22:25:50 +1000
+Date: Tue, 3 Nov 2026 15:15:10 +1100
 Subject: [PATCH] Support external authentication providers in front of Home
  Assistant
 
@@ -10,8 +10,8 @@ oauth2-proxy) can complete their interactive sign-in inside the app instead of
 being ejected to the system browser, where the resulting session cookie never
 returns to the app's WebView.
 
-HAWebViewClient overrides shouldOverrideUrlLoading(WebResourceRequest) and keeps
-two kinds of navigation in-WebView: server-initiated http(s) redirects on the
+HAWebViewClient's shouldOverrideUrlLoading(WebResourceRequest) now keeps two
+kinds of navigation in-WebView: server-initiated http(s) redirects on the
 main frame (the proxy challenge and its return redirect), and any main-frame
 http(s) navigation made while the WebView is currently on a host other than the
 Home Assistant origin (so federated-IdP buttons on a proxy login page are not
@@ -34,14 +34,22 @@ Based on closed upstream PR home-assistant/android#6725.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ---
- .../companion/android/util/HAWebViewClient.kt | 46 +++++++++++++++++++
- 1 file changed, 46 insertions(+)
+ .../companion/android/util/HAWebViewClient.kt | 42 +++++++++++++++++++
+ 1 file changed, 42 insertions(+)
 
 diff --git a/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt b/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt
-index 25e4aca7b..8c2d70169 100644
+index 23be2f010..ab4027620 100644
 --- a/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt
 +++ b/app/src/main/kotlin/io/homeassistant/companion/android/util/HAWebViewClient.kt
-@@ -269,6 +269,52 @@ class HAWebViewClient internal constructor(
+@@ -13,6 +13,7 @@ import android.webkit.WebResourceRequest
+ import android.webkit.WebResourceResponse
+ import android.webkit.WebView
+ import androidx.annotation.VisibleForTesting
++import androidx.core.net.toUri
+ import androidx.webkit.WebViewCompat
+ import androidx.webkit.WebViewFeature
+ import io.homeassistant.companion.android.common.R as commonR
+@@ -308,10 +309,51 @@ class HAWebViewClient internal constructor(
          return true
      }
  
@@ -64,15 +72,14 @@ index 25e4aca7b..8c2d70169 100644
 +     * Everything else falls through to [onUrlIntercepted], so user-tapped external links on the
 +     * Home Assistant frontend still open in the system browser exactly as before.
 +     */
-+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
 +        if (isAuthProviderNavigation(view, request)) {
 +            Timber.d("Allowing main-frame navigation to load in WebView (auth flow)")
 +            return false
 +        }
-+        @Suppress("DEPRECATION")
-+        return shouldOverrideUrlLoading(view, request?.url?.toString())
-+    }
-+
+         return request?.url?.let { onUrlIntercepted?.invoke(it, isTLSClientAuthNeeded) } ?: false
+     }
+ 
 +    /**
 +     * The Home Assistant origin the WebView is anchored to, derived from [currentUrlFlow] (the URL
 +     * the app asked the WebView to load). Navigation away from this host is what marks an in-flight
@@ -91,9 +98,9 @@ index 25e4aca7b..8c2d70169 100644
 +        return !currentHost.equals(anchorHost, ignoreCase = true)
 +    }
 +
-     // Override deprecated method for backward compatibility with API 23 and below.
-     // The non-deprecated shouldOverrideUrlLoading(WebView, WebResourceRequest) is not invoked
-     // on these older Android versions, so this method remains necessary.
+     private fun formatErrorDetails(context: Context?, code: Int?, description: String?): String {
+         return context?.getString(
+             commonR.string.connection_error_more_details_description_content,
 -- 
 2.50.1 (Apple Git-155)
 

@@ -79,7 +79,7 @@ The fix is to distinguish two kinds of navigation:
 
 This was proposed upstream as **[home-assistant/android#6725](https://github.com/home-assistant/android/pull/6725)** ("support external authentication providers in front of Home Assistant"). It was **closed, not merged**: the maintainers decided that external-auth-provider support belongs in Home Assistant **core** rather than in each client, and raised security concerns about broadening what the WebView is allowed to load while the JavaScript auth bridge is present.
 
-A separate, self-contained security-hardening change, **[home-assistant/android#6733](https://github.com/home-assistant/android/pull/6733)** ("tie legacy externalApp bridge lifecycle to the configured server origin"), tightened when the token-bearing JavaScript bridge is exposed — removing it when the WebView is off-origin and restoring it on return, so the auth-token bridge is only ever live on your real Home Assistant origin and never on a proxy's login pages. It was offered as a standalone hardening that stands on its own merits regardless of the feature. It was **also closed, not merged**; the maintainer's reasoning was that the hardening is *"only relevant if we ever allow loading an url that is not Home Assistant"* — i.e. it only matters if the feature in #6725 is accepted, which they had already declined. That hardening still informs this patch's design.
+A separate, self-contained security-hardening change, **[home-assistant/android#6733](https://github.com/home-assistant/android/pull/6733)** ("tie legacy externalApp bridge lifecycle to the configured server origin"), tightened when the token-bearing JavaScript bridge is exposed — removing it when the WebView is off-origin and restoring it on return, so the auth-token bridge is only ever live on your real Home Assistant origin and never on a proxy's login pages. It was offered as a standalone hardening that stands on its own merits regardless of the feature. It was **also closed, not merged**; the maintainer's reasoning was that the hardening is *"only relevant if we ever allow loading an url that is not Home Assistant"* — i.e. it only matters if the feature in #6725 is accepted, which they had already declined. This patch does **not** include that hardening — see [Trust and security](#trust-and-security) for what that means in practice.
 
 So **both** the feature and the defence-in-depth that would accompany it were declined. See [Why this isn't in Home Assistant core](#why-this-isnt-in-home-assistant-core-and-may-not-ever-be) for the architectural, philosophical, and (speculatively) commercial reasons — and why that's unlikely to change.
 
@@ -93,7 +93,7 @@ The entire change is one git `format-patch` file:
 
 **[`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch)**
 
-It touches **exactly one Kotlin file** (roughly **46 insertions, 0 deletions**) and adds no new dependencies, permissions, or network endpoints:
+It touches **exactly one Kotlin file** (roughly **42 insertions, 0 deletions**) and adds no new dependencies, permissions, or network endpoints:
 
 | File | Change |
 | --- | --- |
@@ -119,8 +119,12 @@ This app holds your **Home Assistant long-lived auth token**. Installing a third
 
     - It **does** protect updates. Android only installs an update over an existing install if both are signed with the **same** key. Because only the maintainer holds this private key, a modified APK from anywhere else **cannot** masquerade as an in-place update to an installed copy. (An earlier version of this project signed with a *committed, public* debug key — which let anyone forge a matching-signature "update." It was replaced precisely to close that gap.)
     - Because every release shares this one key, genuine updates install **in place** (no uninstall between versions) and you only clear Google Play Protect **once**. (See [Installing](#installing).)
-- **It holds your HA auth token.** The token-bearing JavaScript bridge is the most sensitive surface in the app. This patch is deliberately narrow and is designed to keep that bridge anchored to your real Home Assistant origin, consistent with the hardening direction of [#6733](https://github.com/home-assistant/android/pull/6733). It does not add new token handling.
-- **Read the patch.** The complete change is **one short file**: [`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch). One source file, ~46 lines. You can read it in a few minutes. Every other source file in a release is **unchanged upstream Home Assistant** — the patch is the only modification to the source. (The compiled APK isn't byte-identical to a stock build — see [why your APK won't match our SHA-256](#why-your-apk-wont-match-our-sha-256-and-thats-fine) — but the *source diff* is exactly this patch and nothing else.)
+- **It holds your HA auth token, and this is the main trade-off.** The token-bearing JavaScript bridge is the most sensitive surface in the app. The patch adds no new token handling, but it does let non-Home-Assistant pages — your proxy's login page and anything that page navigates to — load in the same WebView as that bridge, and it adds **no bridge protection of its own**. The bridge code is unchanged upstream, so what protects the token depends on which version the app selects:
+    - **V2 bridge (origin-checked).** Ignores messages from iframes and from any origin other than your Home Assistant server, so a proxy login page can't use it. Used when your server is **2026.4.2 or newer** (and the app knows that) and the device's WebView supports message listeners.
+    - **V1 bridge (legacy, no origin check).** The fallback in every other case, including when the app doesn't know the server's version. It is exposed to whatever page is loaded, so a page reached during sign-in could request a Home Assistant access token. The hardening proposed in [#6733](https://github.com/home-assistant/android/pull/6733) addressed exactly this; it was declined and isn't included here.
+
+    **In practice: run Home Assistant 2026.4.2 or newer, keep Android System WebView updated, and only put login pages you trust in front of it.**
+- **Read the patch.** The complete change is **one short file**: [`patches/0001-auth-proxy-redirect-support.patch`](patches/0001-auth-proxy-redirect-support.patch). One source file, ~42 lines. You can read it in a few minutes. Every other source file in a release is **unchanged upstream Home Assistant** — the patch is the only modification to the source. (The compiled APK isn't byte-identical to a stock build — see [why your APK won't match our SHA-256](#why-your-apk-wont-match-our-sha-256-and-thats-fine) — but the *source diff* is exactly this patch and nothing else.)
 - **Build it yourself.** You don't have to trust the published APK at all. The [build instructions](#building-it-yourself) let you reproduce a release from the exact upstream commit it names. The workflow that produces releases is in this repo in full — there is nothing hidden.
 - **Unaffiliated.** This project is **not affiliated with, endorsed by, or supported by Home Assistant, Nabu Casa, the Open Home Foundation, or any of the proxy/IdP vendors named above.**
 - **No warranty.** This is provided **as-is, with no warranty of any kind**. You run it at your own risk. If something breaks, you keep both pieces.
@@ -130,6 +134,8 @@ If you're satisfied, head to [Installing](#installing) below. If not, [build it 
 ---
 
 ## Installing
+
+**Requires Android 7.0 (API 24) or newer.** Upstream dropped Android 6 in [#7398](https://github.com/home-assistant/android/pull/7398). The last release here that still installs on Android 6 is [`v2026.11.0-authproxy-g7422c80`](../../releases/tag/v2026.11.0-authproxy-g7422c80).
 
 1. **Download the APK** from the **[latest release](../../releases/latest)**. The asset is named:
 
@@ -220,7 +226,7 @@ You can rebuild any release locally from the exact source it was made from — t
 - **JDK 21** (Temurin recommended)
 - **Android SDK** with `sdkmanager`
 - **git**
-- The build targets `minSdk` 23 / `compileSdk` 37 (resolved from upstream config); the toolchain above covers them.
+- The build targets `minSdk` 24 / `compileSdk` 37 (resolved from upstream config); the toolchain above covers them.
 
 ### Steps
 
@@ -259,7 +265,7 @@ The APK lands at:
 app/build/outputs/apk/minimal/debug/app-minimal-debug.apk
 ```
 
-A clean build is **roughly 60 MB** — about the same as the released APK. It can come out larger (~80 MB) if a previous incremental build left the native debug symbols in `libmicrowakeword.so` unstripped; that's harmless (debug symbols only). It's auto-signed with **your own** machine's Android debug keystore — no signing secret required.
+Expect it to be about the same size as the released APK (around 70 MB as of 2026.11; each release's notes give its exact size). It can come out noticeably larger if a previous incremental build left the native debug symbols in `libmicrowakeword.so` unstripped; that's harmless (debug symbols only). It's auto-signed with **your own** machine's Android debug keystore — no signing secret required.
 
 ### Why your APK won't match our SHA-256 (and that's fine)
 
@@ -303,12 +309,14 @@ The workflow at **[`.github/workflows/build-and-release.yml`](.github/workflows/
 5. **Applies the patch** with a 3-way merge (`scripts/apply-patch.sh`). If it no longer applies cleanly, the workflow **opens/refreshes a GitHub issue** containing the conflict/reject detail and **fails** — see the [contributor section](#for-contributors-updating-the-patch-when-upstream-breaks-it).
 6. **Installs the right CMake and NDK.** Both versions are read **dynamically** from upstream `gradle/libs.versions.toml` (`cmake` and `androidNdk`) — *not* hardcoded — and installed via `sdkmanager` (accepting licenses) **before** the Gradle build, so the native `:microwakeword` module builds. This is required because the GitHub-hosted runner has the Android SDK but not the pinned CMake, and the build otherwise fails with `[CXX1300] CMake '…' was not found`.
 7. **Provides a mock `google-services.json`.** The `google-services` Gradle plugin runs even for the FOSS `minimal` flavor and fails if the file is missing, so upstream's `.github/mock-google-services.json` is copied to `app/google-services.json` (module-root location, covering all flavor/buildType combos).
-8. **Builds** `:app:assembleMinimalDebug` with **JDK 21** and `-Preckon.stage=beta` (see note below).
-9. **Renames the APK**, computes the version + tag, generates release notes, and creates the GitHub Release with the APK and its SHA-256 checksum, marked as **latest**.
+8. **Decodes the release signing key** from repo secrets to a temporary file. `keystore/signing-override.init.gradle` then points the build's signing config at it.
+9. **Builds** `:app:assembleMinimalDebug` with **JDK 21** and `-Preckon.stage=beta` (see note below).
+10. **Verifies the APK's signing certificate** against the project fingerprint and fails the run on any mismatch, so a wrongly signed APK can't be published.
+11. **Derives the version + tag, renames the APK**, generates release notes, and creates the GitHub Release with the APK and its SHA-256 checksum, marked as **latest**.
 
 **Triggers:** a daily `schedule` (a quiet UTC hour, to pick up upstream changes), `workflow_dispatch` (with the `force` boolean to rebuild even when unchanged), and `push` to this repo's `main` (so editing the patch rebuilds). A **concurrency group** prevents overlapping runs.
 
-**Permissions:** the minimum needed — `contents: write` (create the tag/release) and `issues: write` (alert on patch failure). It uses the built-in `GITHUB_TOKEN`; no personal access token is required, since everything is on this repo plus public read of upstream.
+**Permissions:** the minimum needed — `contents: write` (create the tag/release) and `issues: write` (alert on patch failure). It uses the built-in `GITHUB_TOKEN`; no personal access token is required, since everything is on this repo plus public read of upstream. The only other credentials are the four signing secrets: `SIGNING_KEYSTORE_B64`, `SIGNING_STORE_PASS`, `SIGNING_KEY_ALIAS`, and `SIGNING_KEY_PASS`.
 
 > **Note on `reckon`:** upstream's `reckon` Gradle plugin computes the project version from git tags, and in CI (where the `CI` env var is present, as GitHub Actions sets it) it selects a staged scheme that **requires** a *stage*. Passing `-Preckon.stage=beta` satisfies it. Unsetting `CI` does **not** help — Gradle sees the variable as present even when empty (`environmentVariable("CI").isPresent` is `true`). This is also why the upstream clone must include tags: reckon needs an existing tag as its base version. The resulting reckon version string is irrelevant here; release names come from the [versioning](#versioning) scheme above.
 
@@ -326,7 +334,7 @@ On a brand-new repo there are no releases yet, so the no-op check finds nothing 
 
 ## For contributors: updating the patch when upstream breaks it
 
-Because the patch is applied on top of a **moving** upstream `main`, upstream will eventually refactor one of the three touched files and the patch will stop applying. When that happens the auto-build **opens (or refreshes) a GitHub issue** with the conflict/reject output and fails — that's the signal to update the patch.
+Because the patch is applied on top of a **moving** upstream `main`, upstream will eventually change the code around it in `util/HAWebViewClient.kt` and the patch will stop applying. When that happens the auto-build **opens (or refreshes) a GitHub issue** with the conflict/reject output and fails — that's the signal to update the patch.
 
 To refresh it:
 
@@ -353,7 +361,7 @@ git format-patch -1 --stdout > /path/to/patches/0001-auth-proxy-redirect-support
 
 Keep the change **minimal** and confined to `util/HAWebViewClient.kt`. The whole patch lives in that one class and derives the Home Assistant origin from the `currentUrlFlow` it is constructed with, so it needs no cooperation from any ViewModel.
 
-> **Why it's structured this way.** Upstream reshapes the frontend/WebView layer regularly — it replaced `WebViewActivity` with `FrontendScreen`/`FrontendViewModel`, then moved the web clients behind `SuspendLazy` for async mTLS loading. Earlier versions of this patch pushed a `serverHost` anchor in from those call sites and broke each time they moved. Deriving the anchor inside the client removed that coupling. If you ever do need to re-fit it, prefer solutions that stay inside `HAWebViewClient` over ones that reach back into ViewModels.
+> **Why it's structured this way.** Upstream reshapes the frontend/WebView layer regularly — it replaced `WebViewActivity` with `FrontendScreen`/`FrontendViewModel`, then moved the web clients behind `SuspendLazy` for async mTLS loading. Earlier versions of this patch pushed a `serverHost` anchor in from those call sites and broke each time they moved. Deriving the anchor inside the client removed that coupling. Even so, the file itself still changes: dropping API 23 ([#7398](https://github.com/home-assistant/android/pull/7398)) deleted the deprecated `shouldOverrideUrlLoading(WebView, String)` the patch used to fall through to, so it now calls `onUrlIntercepted` directly. That edit would not have compiled if merged mechanically, which is why step 3 matters. If you ever do need to re-fit it, prefer solutions that stay inside `HAWebViewClient` over ones that reach back into ViewModels.
 
 Commit the regenerated patch to this repo's `main`; the `push` trigger rebuilds and, if green, publishes a fresh release. Helper scripts you'll find useful:
 
