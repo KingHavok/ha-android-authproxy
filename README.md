@@ -310,7 +310,7 @@ The workflow at **[`.github/workflows/build-and-release.yml`](.github/workflows/
 6. **Installs the right CMake and NDK.** Both versions are read **dynamically** from upstream `gradle/libs.versions.toml` (`cmake` and `androidNdk`) — *not* hardcoded — and installed via `sdkmanager` (accepting licenses) **before** the Gradle build, so the native `:microwakeword` module builds. This is required because the GitHub-hosted runner has the Android SDK but not the pinned CMake, and the build otherwise fails with `[CXX1300] CMake '…' was not found`.
 7. **Provides a mock `google-services.json`.** The `google-services` Gradle plugin runs even for the FOSS `minimal` flavor and fails if the file is missing, so upstream's `.github/mock-google-services.json` is copied to `app/google-services.json` (module-root location, covering all flavor/buildType combos).
 8. **Decodes the release signing key** from repo secrets to a temporary file. `keystore/signing-override.init.gradle` then points the build's signing config at it.
-9. **Builds** `:app:assembleMinimalDebug` with **JDK 21** and `-Preckon.stage=beta` (see note below).
+9. **Builds** `:app:assembleMinimalDebug` with **JDK 21** and `-Preckon.stage=beta` (see note below). It downloads the Gradle distribution first, retrying up to four times, because upstream's wrapper doesn't retry and a single timeout from `services.gradle.org` would otherwise fail the run.
 10. **Verifies the APK's signing certificate** against the project fingerprint and fails the run on any mismatch, so a wrongly signed APK can't be published.
 11. **Derives the version + tag, renames the APK**, generates release notes, and creates the GitHub Release with the APK and its SHA-256 checksum, marked as **latest**.
 
