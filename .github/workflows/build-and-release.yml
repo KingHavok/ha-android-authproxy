@@ -399,10 +399,24 @@ jobs:
             echo "::warning::Gradle download failed (attempt ${attempt}); retrying in $((attempt * 30))s"
             sleep $((attempt * 30))
           done
-          ./gradlew :app:assembleMinimalDebug \
-            --init-script "${GITHUB_WORKSPACE}/keystore/signing-override.init.gradle" \
-            -Preckon.stage=beta \
-            --no-daemon --stacktrace
+          # The build itself flakes now and then on code that builds fine the next
+          # day (a plugin repository failing to resolve reckon, a Hilt class-loading
+          # race in ASM instrumentation). Retry it once; a real build error fails
+          # both attempts and still fails the run.
+          for attempt in 1 2; do
+            if ./gradlew :app:assembleMinimalDebug \
+                --init-script "${GITHUB_WORKSPACE}/keystore/signing-override.init.gradle" \
+                -Preckon.stage=beta \
+                --no-daemon --stacktrace; then
+              break
+            fi
+            if [ "${attempt}" -eq 2 ]; then
+              echo "::error::Build failed on both attempts, so this is likely a real build error rather than a transient one"
+              exit 1
+            fi
+            echo "::warning::Build failed (attempt ${attempt}); retrying once in 60s in case it was transient"
+            sleep 60
+          done
 
       # ----------------------------------------------------------------------
       # 9b. Fail loudly if the APK is NOT signed with the project release key.
