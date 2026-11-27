@@ -135,7 +135,7 @@ If you're satisfied, head to [Installing](#installing) below. If not, [build it 
 
 ## Installing
 
-**Requires Android 7.0 (API 24) or newer.** Upstream dropped Android 6 in [#7398](https://github.com/home-assistant/android/pull/7398). The last release here that still installs on Android 6 is [`v2026.11.0-authproxy-g7422c80`](../../releases/tag/v2026.11.0-authproxy-g7422c80).
+**Requires Android 7.0 (API 24) or newer.** Upstream dropped Android 6 in [#7398](https://github.com/home-assistant/android/pull/7398). The last release here that still installs on Android 6 is [`v2026.11.0-authproxy-g7422c80`](../../releases/tag/v2026.11.0-authproxy-g7422c80). It's pinned, so the [automatic clean-up of old releases](#how-the-auto-build-works) never deletes it.
 
 1. **Download the APK** from the **[latest release](../../releases/latest)**. The asset is named:
 
@@ -313,6 +313,7 @@ The workflow at **[`.github/workflows/build-and-release.yml`](.github/workflows/
 9. **Builds** `:app:assembleMinimalDebug` with **JDK 21** and `-Preckon.stage=beta` (see note below). It downloads the Gradle distribution first, retrying up to four times, because upstream's wrapper doesn't retry and a single timeout from `services.gradle.org` would otherwise fail the run. If the build itself fails, it waits a minute and tries **once** more: now and then a build fails on code that builds fine the next day (a plugin repository briefly failing to serve a Gradle plugin, or a race in the build tooling). A real build error fails both attempts, so the run still fails and alerts.
 10. **Verifies the APK's signing certificate** against the project fingerprint and fails the run on any mismatch, so a wrongly signed APK can't be published.
 11. **Derives the version + tag, renames the APK**, generates release notes, and creates the GitHub Release with the APK and its SHA-256 checksum, marked as **latest**.
+12. **Prunes old releases.** It keeps the **15 newest** plus any pinned ones (currently just the last Android 6 build) and deletes the rest along with their tags. This isn't about space, since GitHub doesn't limit release storage. It keeps the Releases page readable and stops very old builds, some signed with the old public debug key, from being downloaded. To change the count or pin another release, edit `KEEP_RELEASES` or `PINNED_RELEASES` in the workflow.
 
 **Triggers:** a daily `schedule` (a quiet UTC hour, to pick up upstream changes), `workflow_dispatch` (with the `force` boolean to rebuild even when unchanged), and `push` to this repo's `main` (so editing the patch rebuilds). A **concurrency group** prevents overlapping runs.
 

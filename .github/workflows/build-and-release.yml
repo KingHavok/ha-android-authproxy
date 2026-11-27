@@ -639,6 +639,54 @@ jobs:
           echo "Released ${TAG}"
 
       # ----------------------------------------------------------------------
+      # 13b. Prune old releases: keep the newest KEEP_RELEASES plus anything in
+      #      PINNED_RELEASES, and delete the rest along with their tags. This is
+      #      not about space (GitHub doesn't limit release storage). A long list
+      #      of near-identical daily builds is hard to browse, and the oldest
+      #      ones were signed with the old public debug key. Failures only warn,
+      #      because the new release is already published by this point.
+      # ----------------------------------------------------------------------
+      - name: Prune old releases
+        if: steps.noop.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RELEASES: "15"
+          # Space-separated tags that are never pruned. v2026.11.0-authproxy-g7422c80
+          # is the last build that installs on Android 6 (upstream dropped API 23
+          # in home-assistant/android#7398), and the README links to it.
+          PINNED_RELEASES: "v2026.11.0-authproxy-g7422c80"
+        run: |
+          set -euo pipefail
+          # Newest first by published_at. A release's created_at is the date of
+          # its target commit, so it doesn't reflect publish order.
+          TAGS="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | [.published_at, .tag_name] | @tsv' \
+            | sort -r | cut -f2)"
+          echo "Keeping the newest ${KEEP_RELEASES} releases plus pinned: ${PINNED_RELEASES}"
+          i=0
+          deleted=0
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] || continue
+            i=$((i + 1))
+            [ "${i}" -le "${KEEP_RELEASES}" ] && continue
+            # Only ever touch tags this workflow creates.
+            if ! [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-authproxy-g[0-9a-f]+$ ]]; then
+              echo "Skipping unrecognised tag ${tag}"
+              continue
+            fi
+            if [[ " ${PINNED_RELEASES} " == *" ${tag} "* ]]; then
+              echo "Keeping pinned ${tag}"
+              continue
+            fi
+            if gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes; then
+              deleted=$((deleted + 1))
+            else
+              echo "::warning::Could not delete release ${tag}"
+            fi
+          done <<< "${TAGS}"
+          echo "Pruned ${deleted} old release(s); ${i} existed before pruning."
+
+      # ----------------------------------------------------------------------
       # 14. Friendly summary in the run's job summary panel.
       # ----------------------------------------------------------------------
       - name: Write job summary
